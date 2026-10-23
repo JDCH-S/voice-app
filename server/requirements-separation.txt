@@ -1,0 +1,5 @@
+# Optional: vocal separation with Demucs (CPU works, GPU is faster).
+# Install torch first from the CPU index to avoid pulling CUDA wheels:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements-separation.txt
+demucs>=4.0.1
