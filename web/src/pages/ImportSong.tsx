@@ -249,10 +249,15 @@ export default function ImportSong() {
           </div>
           <div className="card col">
             <h3>Analysis</h3>
-            {server?.ok ? (
+            {server?.ok && server.separation === 'demucs' ? (
+              <div className="banner good small">
+                The singer's voice will be isolated from the band, so the notes come from the vocal alone. On a laptop this takes a few minutes
+                for a 4-minute song. You can start singing straight away; the song switches to the isolated vocal by itself when it's ready.
+              </div>
+            ) : server?.ok ? (
               <label className="toggle">
                 <input type="checkbox" checked={useServer} onChange={(e) => setUseServer(e.target.checked)} />
-                Use the analysis server {server.separation === 'demucs' ? '(isolates the vocal with Demucs; a 4-minute song takes a few minutes on CPU, you can start practising meanwhile)' : '(melody only; separation is not installed on the server)'}
+                Use the analysis server (melody only: vocal separation is not installed on the server)
               </label>
             ) : (
               <div className="banner warn small">

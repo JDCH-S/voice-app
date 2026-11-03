@@ -76,8 +76,8 @@ export default function Settings() {
       <div className="card col">
         <h3>Analysis server</h3>
         <p className="small muted">
-          Optional local service that isolates the vocal (Demucs) and extracts the reference performance. Without it, songs are analysed in the
-          browser in fallback mode. See <code>server/README.md</code>.
+          The part of Voice Coach that isolates the singer's voice and reads the notes. When you start Voice Coach with the start file it runs
+          automatically at this same address. Without it, songs are analysed in the browser in fallback mode.
         </p>
         <div className="row">
           <input type="url" value={url} onChange={(e) => setUrl(e.target.value)} style={{ maxWidth: 360 }} />

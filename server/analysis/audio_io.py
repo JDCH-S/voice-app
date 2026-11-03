@@ -17,7 +17,23 @@ from typing import Optional
 import numpy as np
 import soundfile as sf
 
-FFMPEG = os.environ.get("FFMPEG_BIN") or shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+def _find_ffmpeg() -> str:
+    """FFMPEG_BIN, then ffmpeg on the PATH, then the copy bundled with imageio-ffmpeg (Windows/Mac)."""
+    env = os.environ.get("FFMPEG_BIN")
+    if env:
+        return env
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg  # bundles a static ffmpeg binary per platform
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "/usr/bin/ffmpeg"
+
+
+FFMPEG = _find_ffmpeg()
 ANALYSIS_SR = 22050
 STEM_SR = 44100
 

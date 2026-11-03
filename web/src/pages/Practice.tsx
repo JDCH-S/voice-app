@@ -7,6 +7,7 @@ import { decodeBlob } from '../lib/audio/decode';
 import { player } from '../lib/audio/Player';
 import PracticeSession, { type AttemptOut } from '../components/PracticeSession';
 import { checkSongJob, type UpgradeInfo } from '../lib/songJobs';
+import { startAnalysis } from '../lib/api';
 import { uid, fmtTime } from '../lib/music/notes';
 import { recommendSemitones } from '../lib/songs';
 
@@ -14,7 +15,7 @@ export default function Practice() {
   const { songId } = useParams();
   const [params] = useSearchParams();
   const nav = useNavigate();
-  const { profile, registerAttempt, noteActivity } = useApp();
+  const { profile, registerAttempt, noteActivity, server } = useApp();
   const [song, setSong] = useState<SongRecord | null>(null);
   const [loading, setLoading] = useState('Loading song…');
   const [hasStems, setHasStems] = useState(false);
@@ -23,6 +24,7 @@ export default function Practice() {
   const [recordings, setRecordings] = useState<RecordingRecord[]>([]);
   const [replay, setReplay] = useState<{ buffer: AudioBuffer; start: number; tempo: number; semitones: number; frames: PitchFrame[]; from: number; to: number } | null>(null);
   const [showTakes, setShowTakes] = useState(false);
+  const [isolating, setIsolating] = useState(false);
   const songRef = useRef<SongRecord | null>(null);
   songRef.current = song;
 
@@ -175,6 +177,25 @@ export default function Practice() {
     }
   }
 
+  async function isolateVocal() {
+    const s = songRef.current;
+    if (!s) return;
+    setIsolating(true);
+    try {
+      const orig = await getAsset(s.id, 'original');
+      if (!orig) throw new Error('the original audio of this song is missing; add the song again');
+      const jobId = await startAnalysis(orig.blob, `${s.title || 'song'}.mp3`, true);
+      const updated = { ...s, jobId };
+      await saveSong(updated);
+      setUpgrade({ status: 'queued', progress: 0, message: '', done: false, failed: false });
+      setSong(updated);
+    } catch (e) {
+      setUpgrade({ status: 'failed', progress: 1, message: `Could not start vocal isolation: ${(e as Error).message}`, done: true, failed: true });
+    } finally {
+      setIsolating(false);
+    }
+  }
+
   if (!profile) return null;
   if (!song) return <div className="card">{loading}</div>;
   const last = profile.rangeTests[profile.rangeTests.length - 1];
@@ -192,6 +213,16 @@ export default function Practice() {
       </div>
     ) : upgrade?.failed ? (
       <div className="banner warn">{upgrade.message}</div>
+    ) : song.mode === 'mix' && server?.ok && server.separation === 'demucs' ? (
+      <div className="banner info">
+        <div className="grow">
+          This song was analysed from the full mix, so some bars may be off. Isolate the singer's voice for accurate notes and the vocal-only
+          and band-only tracks. It takes a few minutes; you can keep singing meanwhile.
+        </div>
+        <button className="primary" onClick={isolateVocal} disabled={isolating}>
+          {isolating ? 'Starting…' : 'Isolate the vocal'}
+        </button>
+      </div>
     ) : song.analysis.warnings.length && song.mode === 'mix' ? (
       <div className="banner warn">
         <div className="grow">{song.analysis.warnings[0]}</div>

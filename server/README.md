@@ -33,6 +33,10 @@ PyPI also works but pulls the CUDA libraries (several GB). Demucs downloads the
 torch hub cache; to run fully offline, put the model files in a folder and set
 `DEMUCS_REPO=/path/to/folder`.
 
+## Single-program mode
+
+If `web/dist` exists (run `npm run build` in `web/`), this service also serves the web app at `/`, with unknown paths falling back to `index.html`. The app then talks to the service at its own address, so Voice Coach runs as one program. The start scripts in the repository root (`Start Voice Coach.bat`, `start.sh`) do this on port 5173. `VOICECOACH_WEB_DIST` overrides the folder, and `VOICECOACH_OPEN_BROWSER=<url>` opens a browser tab once the server is up. ffmpeg comes from `imageio-ffmpeg` when it isn't on the PATH, so nothing else needs installing on Windows or Mac.
+
 ## Run
 
 ```bash

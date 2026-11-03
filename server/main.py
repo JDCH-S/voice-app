@@ -7,6 +7,8 @@ See docs/ANALYSIS_SCHEMA.md for the API contract and server/README.md for usage.
 from __future__ import annotations
 
 import logging
+import mimetypes
+import webbrowser
 import os
 import shutil
 import tempfile
@@ -33,6 +35,11 @@ JOBS_ROOT = os.environ.get("VOICE_JOBS_DIR") or os.path.join(SERVER_DIR, ".jobs"
 JOB_TTL_S = 2 * 60 * 60
 PURGE_INTERVAL_S = 5 * 60
 MAX_UPLOAD_BYTES = int(os.environ.get("VOICE_MAX_UPLOAD_MB", "200")) * 1024 * 1024
+
+# The built web app (web/dist). When present, this service also serves it, so Voice Coach runs
+# as a single program: open http://localhost:<port>/ and the page talks to this same server.
+WEB_DIST = os.environ.get("VOICECOACH_WEB_DIST") or os.path.join(os.path.dirname(SERVER_DIR), "web", "dist")
+OPEN_BROWSER_URL = os.environ.get("VOICECOACH_OPEN_BROWSER")  # e.g. http://localhost:5173/
 
 log = logging.getLogger("voicecoach")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -294,6 +301,10 @@ async def lifespan(app: FastAPI):
     quick_pool.submit(_warm_up)
     log.info("separation: %s (%s); stems as %s", "demucs" if separate.is_available() else "unavailable",
              separate.device(), audio_io.stem_format()[0])
+    if os.path.isfile(os.path.join(WEB_DIST, "index.html")):
+        log.info("serving the web app from %s", WEB_DIST)
+    if OPEN_BROWSER_URL:
+        threading.Timer(1.5, lambda: webbrowser.open(OPEN_BROWSER_URL)).start()
     yield
     stop.set()
     quick_pool.shutdown(wait=False, cancel_futures=True)
@@ -443,3 +454,26 @@ def lyrics_search(body: LyricsBody) -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"lyrics lookup failed: {e}")
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"lyrics lookup failed: {e.__class__.__name__}")
+
+
+# ----------------------------------------------------------------- web app (single-program mode)
+
+# Windows can map .js to text/plain in the registry, which breaks module scripts and workers.
+for _ext, _type in ((".js", "text/javascript"), (".mjs", "text/javascript"), (".css", "text/css"),
+                    (".svg", "image/svg+xml"), (".wasm", "application/wasm"), (".json", "application/json")):
+    mimetypes.add_type(_type, _ext)
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def web_app(full_path: str):
+    """Serve web/dist; unknown paths get index.html so the app's own routes survive a page refresh."""
+    index = os.path.join(WEB_DIST, "index.html")
+    if not os.path.isfile(index):
+        raise HTTPException(status_code=404, detail="web app not built (run `npm run build` in web/)")
+    root = os.path.realpath(WEB_DIST)
+    candidate = os.path.realpath(os.path.join(root, full_path))
+    if full_path and candidate.startswith(root + os.sep) and os.path.isfile(candidate):
+        media_type = mimetypes.guess_type(candidate)[0]
+        headers = {"Cache-Control": "public, max-age=31536000, immutable"} if "/assets/" in candidate.replace(os.sep, "/") else {}
+        return FileResponse(candidate, media_type=media_type, headers=headers)
+    return FileResponse(index, media_type="text/html", headers={"Cache-Control": "no-cache"})

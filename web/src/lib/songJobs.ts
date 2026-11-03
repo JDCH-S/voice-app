@@ -42,12 +42,12 @@ export async function checkSongJob(song: SongRecord): Promise<{ info: UpgradeInf
     const updated = { ...song, jobId: null };
     await saveSong(updated);
     await deleteJob(song.jobId);
-    const reason = (st.error || '').split(':').slice(-1)[0].trim();
+    const reason = (st.error || '').split(':').slice(-1)[0].replace(/[<>]/g, '').trim();
     return {
       info: {
         status: 'failed',
         progress: 1,
-        message: `Vocal separation failed on the analysis server${reason ? ` (${reason})` : ''}. You can keep practising in fallback mode; add the song again once the server is fixed to get the isolated vocal.`,
+        message: `Vocal separation failed on the analysis server${reason ? ` (${reason})` : ''}. You can keep practising in fallback mode, and try again later with the "Isolate the vocal" button. The first isolation needs an internet connection to download the separation model once.`,
         done: true,
         failed: true,
       },

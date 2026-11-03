@@ -1,8 +1,20 @@
 import type { SongAnalysis } from './types';
 
-export const DEFAULT_SERVER = 'http://localhost:8765';
+/**
+ * In development (`npm run dev`) the analysis service runs separately on port 8765.
+ * In the built app it is the same program that serves the page, so it lives at the page's own address.
+ */
+const DEV_SERVER = 'http://localhost:8765';
+export const DEFAULT_SERVER = import.meta.env.DEV ? DEV_SERVER : window.location.origin;
 
-let serverUrl = localStorage.getItem('voicecoach.server') || DEFAULT_SERVER;
+function initialServer(): string {
+  const saved = localStorage.getItem('voicecoach.server');
+  // a dev-mode address saved earlier must not override the built-in server of the single-program app
+  if (!saved || (!import.meta.env.DEV && saved === DEV_SERVER)) return DEFAULT_SERVER;
+  return saved;
+}
+
+let serverUrl = initialServer();
 
 export function getServerUrl() {
   return serverUrl;

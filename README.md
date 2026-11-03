@@ -21,14 +21,25 @@ After every take you get a score for pitch, timing, note length and expression, 
 
 **Progress.** Session history, scores per song and per phrase, range over time, pitch-accuracy trend, a personalised "practise next" plan, and an end-of-session recap with what improved and the one thing to fix next time.
 
-## Running it
+## Running it (one program)
+
+You need **Node.js** (LTS, from nodejs.org) and **Python 3.12** (from python.org; on Windows tick "Add python.exe to PATH"). Then:
+
+- **Windows:** double-click **`Start Voice Coach.bat`**.
+- **Mac / Linux:** run `./start.sh`.
+
+The first start installs everything, including vocal separation (several hundred MB, 10 to 20 minutes). After that it starts in seconds. The script builds the web app and starts the analysis service, which also serves the app. Your browser opens at http://localhost:5173. Keep the window open while you use it, and close it to stop. The first vocal isolation downloads the Demucs model (about 80 MB) once.
+
+Your profile, songs and recordings live in the browser at that address, so they carry over between versions.
+
+## Development mode (two processes)
 
 Requirements: Node 18+, a Chromium-based browser or Firefox (Web Audio, AudioWorklet, MediaRecorder), headphones, a laptop or USB microphone.
 
 ```bash
 cd web
 npm install
-npm run dev          # http://localhost:5173
+npm run dev          # http://localhost:5173, talks to the service on :8765
 ```
 
 The browser app works on its own (fallback mode for songs). For isolated vocals and lyrics lookups, also run the analysis service:

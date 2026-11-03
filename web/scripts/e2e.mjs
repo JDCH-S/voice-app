@@ -87,7 +87,7 @@ await page.fill('input[type=text] >> nth=1', 'Synth Singer');
 await page.fill('textarea', 'do re mi fa so\nso la high note down\nquick little run here\ntop and down to rest');
 await page.screenshot({ path: path.join(shots, '04-import.png') });
 if (expectServer) {
-  await page.waitForSelector('text=Use the analysis server');
+  await page.waitForSelector("text=The singer's voice will be isolated");
   log('server detected by the import page');
 }
 await page.click('text=Analyse and start learning');
