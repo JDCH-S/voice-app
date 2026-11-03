@@ -71,6 +71,8 @@ export default function PracticeSession(props: PracticeSessionProps) {
   const [fullResult, setFullResult] = useState<{ overall: number; perPhrase: { phraseIndex: number; score: PhraseScore }[] } | null>(null);
   const [leakWarn, setLeakWarn] = useState(false);
   const [strainWarn, setStrainWarn] = useState(false);
+  const [micWarn, setMicWarn] = useState<null | 'silent' | 'unclear'>(null);
+  const hearStats = useRef({ start: 0, frames: 0, voiced: 0, maxDb: -100 });
   const [iteration, setIteration] = useState(0);
   const { frame } = useMicPitch(true);
 
@@ -154,6 +156,19 @@ export default function PracticeSession(props: PracticeSessionProps) {
         return;
       }
       const pf: PitchFrame = { t, hz: f.hz, midi: f.midi, rms: f.rms, db: f.db, clarity: f.clarity };
+      // can we hear the singer at all? judged over the first seconds of each take
+      const hs = hearStats.current;
+      if (hs.start === 0) hs.start = performance.now();
+      const elapsed = (performance.now() - hs.start) / 1000;
+      if (elapsed > 1.2) {
+        hs.frames++;
+        if (f.hz > 0 && f.clarity > 0.5) hs.voiced++;
+        hs.maxDb = Math.max(hs.maxDb, f.db);
+        if (elapsed > 6 && hs.frames > 100) {
+          if (hs.voiced / hs.frames < 0.03) setMicWarn(hs.maxDb < -50 ? 'silent' : 'unclear');
+          else setMicWarn(null);
+        }
+      }
       // loop wrap: time jumped backwards → finish previous iteration
       if (st === 'singing' && lastTRef.current >= 0 && t < lastTRef.current - 1.0) {
         finishIteration(framesRef.current);
@@ -267,6 +282,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
   async function sing() {
     if (!phrase) return;
     player.stop();
+    hearStats.current = { start: 0, frames: 0, voiced: 0, maxDb: -100 };
     setFeedback(null);
     framesRef.current = [];
     lastTRef.current = -1;
@@ -340,6 +356,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
 
   async function fullRun() {
     player.stop();
+    hearStats.current = { start: 0, frames: 0, voiced: 0, maxDb: -100 };
     setFeedback(null);
     setFullResult(null);
     framesRef.current = [];
@@ -522,6 +539,17 @@ export default function PracticeSession(props: PracticeSessionProps) {
           The microphone heard the guide tone while you were only listening. Sound is leaking from your speakers: put headphones on, or scores
           will be wrong.
           <button onClick={() => setLeakWarn(false)}>Dismiss</button>
+        </div>
+      )}
+      {micWarn && (
+        <div className="banner bad">
+          <div className="grow">
+            {micWarn === 'silent'
+              ? "We can't hear you. The microphone signal is almost silent: it may be muted, too quiet, or the wrong microphone may be selected. "
+              : "We hear sound but no clear singing voice. Sing a little louder and closer to the microphone, and keep the music in your headphones only. "}
+            Check the level bar under the note display on the right: it should move when you sing. If it doesn't, run the microphone check in Settings and pick your microphone there.
+          </div>
+          <button onClick={() => setMicWarn(null)}>OK</button>
         </div>
       )}
       {strainWarn && (

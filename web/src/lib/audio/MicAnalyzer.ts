@@ -26,7 +26,7 @@ export class MicAnalyzer {
   private lastVoiced: RawPitch | null = null;
   private workletLoaded = false;
   public deviceLabel: string | null = null;
-  public gate = 0.004;
+  public gate = 0.002; // about -54 dBFS
   public running = false;
 
   async start(deviceId?: string): Promise<void> {

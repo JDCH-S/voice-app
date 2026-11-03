@@ -277,13 +277,13 @@ export function annotateNotes(notes: RefNote[], midiF: number[], rmsDb: ArrayLik
       const g = midiF.slice(glideA, glideB);
       const span = Math.abs(prev.midi + prev.cents / 100 - med);
       const dur = countTransitionFrames(g, prev.midi, n.midi) * hop;
-      if (span >= 1.5 && dur >= 0.06) n.slideIn = { fromMidi: prev.midi, duration: Math.round(dur * 1000) / 1000 };
+      if (span >= 1.5 && span <= 12 && dur >= 0.06) n.slideIn = { fromMidi: prev.midi, duration: Math.round(dur * 1000) / 1000 };
     } else {
       // scoop from below at the very start of a run
       const head = midiF.slice(n._a, Math.min(n._b, n._a + Math.round(0.15 / hop)));
       if (head.length >= 4) {
         const first = median(head.slice(0, 2));
-        if (med - first >= 1.5) n.slideIn = { fromMidi: Math.round(first), duration: Math.round(head.length * hop * 1000) / 1000 };
+        if (med - first >= 1.5 && med - first <= 5) n.slideIn = { fromMidi: Math.round(first), duration: Math.round(head.length * hop * 1000) / 1000 };
       }
     }
   }

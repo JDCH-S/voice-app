@@ -217,41 +217,74 @@ export class Player {
   }
 
   private lastGuideIteration = 0;
+  private voiceWave: PeriodicWave | null = null;
 
+  /** A soft, flute/hum-like timbre: strong fundamental, a little 2nd and 3rd harmonic. */
+  private getVoiceWave(ctx: AudioContext): PeriodicWave {
+    if (!this.voiceWave) {
+      const real = new Float32Array([0, 0, 0, 0, 0]);
+      const imag = new Float32Array([0, 1, 0.28, 0.1, 0.04]);
+      this.voiceWave = ctx.createPeriodicWave(real, imag);
+    }
+    return this.voiceWave;
+  }
+
+  /**
+   * Schedule the guide melody for one pass. Notes that follow each other closely are played as
+   * one connected tone that glides between pitches (like humming the line), not as separate beeps.
+   * Very short notes are skipped: in fallback mode they are mostly analysis noise.
+   */
   private scheduleGuide(iterationStartCtx: number) {
     const opts = this.opts;
     if (!opts || !opts.guideNotes || opts.guideNotes.length === 0) return;
     const ctx = getAudioContext();
     const g = opts.guideGain ?? 0.35;
     const { from, to, tempo, semitones } = opts;
-    for (const n of opts.guideNotes) {
-      if (n.end <= from || n.start >= to) continue;
-      const s = Math.max(n.start, from);
-      const e = Math.min(n.end, to);
-      const t0 = iterationStartCtx + (s - from) / tempo;
-      const t1 = iterationStartCtx + (e - from) / tempo;
-      if (t1 <= ctx.currentTime) continue;
+    const notes = opts.guideNotes
+      .filter((n) => n.end > from && n.start < to && n.end - n.start >= 0.09)
+      .sort((a, b) => a.start - b.start);
+    // group into connected lines
+    const groups: GuideNote[][] = [];
+    for (const n of notes) {
+      const last = groups[groups.length - 1];
+      if (last && n.start - last[last.length - 1].end < 0.12) last.push(n);
+      else groups.push([n]);
+    }
+    const now = ctx.currentTime;
+    const toCtx = (songT: number) => iterationStartCtx + (Math.min(to, Math.max(from, songT)) - from) / tempo;
+    for (const grp of groups) {
+      const t0 = toCtx(grp[0].start);
+      const t1 = toCtx(grp[grp.length - 1].end);
+      if (t1 <= now + 0.02) continue;
+      const start = Math.max(now, t0);
       const osc = ctx.createOscillator();
-      osc.type = 'triangle';
-      osc.frequency.value = midiToHz(n.midi + semitones);
-      const osc2 = ctx.createOscillator();
-      osc2.type = 'sine';
-      osc2.frequency.value = midiToHz(n.midi + semitones) * 2;
+      osc.setPeriodicWave(this.getVoiceWave(ctx));
+      const hz = (m: number) => midiToHz(m + semitones);
+      osc.frequency.setValueAtTime(hz(grp[0].midi), start);
+      for (let i = 1; i < grp.length; i++) {
+        const tn = toCtx(grp[i].start);
+        if (tn <= start) {
+          osc.frequency.setValueAtTime(hz(grp[i].midi), start);
+          continue;
+        }
+        const glide = Math.min(0.06, (tn - start) / 2);
+        osc.frequency.setValueAtTime(hz(grp[i - 1].midi), tn - glide);
+        osc.frequency.exponentialRampToValueAtTime(hz(grp[i].midi), tn);
+      }
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 2200;
       const env = ctx.createGain();
-      env.gain.setValueAtTime(0, Math.max(ctx.currentTime, t0));
-      env.gain.linearRampToValueAtTime(g, Math.max(ctx.currentTime, t0) + 0.02);
-      env.gain.setValueAtTime(g, Math.max(t1 - 0.05, t0 + 0.03));
+      const attack = Math.min(0.06, (t1 - start) / 3);
+      const release = Math.min(0.1, (t1 - start) / 3);
+      env.gain.setValueAtTime(0, start);
+      env.gain.linearRampToValueAtTime(g, start + attack);
+      env.gain.setValueAtTime(g, Math.max(start + attack, t1 - release));
       env.gain.linearRampToValueAtTime(0, t1);
-      const g2 = ctx.createGain();
-      g2.gain.value = 0.25;
-      osc.connect(env);
-      osc2.connect(g2).connect(env);
-      env.connect(this.master);
-      osc.start(Math.max(ctx.currentTime, t0));
-      osc2.start(Math.max(ctx.currentTime, t0));
-      osc.stop(t1 + 0.01);
-      osc2.stop(t1 + 0.01);
-      this.guideNodes.push(osc, osc2);
+      osc.connect(lp).connect(env).connect(this.master);
+      osc.start(start);
+      osc.stop(t1 + 0.02);
+      this.guideNodes.push(osc);
     }
   }
 
@@ -319,11 +352,11 @@ export class Player {
     const ctx = await resumeAudio();
     const t0 = ctx.currentTime + 0.03;
     const osc = ctx.createOscillator();
-    osc.type = 'triangle';
+    osc.setPeriodicWave(this.getVoiceWave(ctx));
     osc.frequency.value = midiToHz(midi);
     const env = ctx.createGain();
     env.gain.setValueAtTime(0, t0);
-    env.gain.linearRampToValueAtTime(gain, t0 + 0.03);
+    env.gain.linearRampToValueAtTime(gain, t0 + 0.05);
     env.gain.setValueAtTime(gain, t0 + seconds - 0.08);
     env.gain.linearRampToValueAtTime(0, t0 + seconds);
     osc.connect(env).connect(this.master);

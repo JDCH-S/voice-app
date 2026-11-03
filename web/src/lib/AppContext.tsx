@@ -4,6 +4,8 @@ import { loadProfile, saveProfile, saveSession, listAttempts, listSongs, listSes
 import { uid } from './music/notes';
 import { buildRecap } from './plan';
 import { health, type Health } from './api';
+import { mic } from './audio/MicAnalyzer';
+import { gateFor } from '../components/CalibrationWizard';
 
 interface AppState {
   profile: Profile | null;
@@ -48,7 +50,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   sessionRef.current = session;
 
   useEffect(() => {
-    loadProfile().then(setProfile);
+    loadProfile().then((p) => {
+      setProfile(p);
+      // apply the saved microphone gate (recomputed with the current, safer rule)
+      if (p.calibration) mic.setGate(Math.pow(10, gateFor(p.calibration.noiseFloorDb, p.calibration.singingLevelDb) / 20));
+    });
     // resume the session in progress after a reload (sessions end explicitly or after 3 h idle)
     (async () => {
       const all = await listSessions();

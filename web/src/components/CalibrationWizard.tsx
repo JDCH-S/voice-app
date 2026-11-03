@@ -7,6 +7,17 @@ import PitchMeter from './PitchMeter';
 import type { MicCalibration } from '../lib/types';
 import { mean } from '../lib/music/notes';
 
+/**
+ * Silence gate for the pitch tracker. It sits a little above the room noise but always well below
+ * the singing level, and never higher than -48 dBFS: the tracker's own clarity check rejects noise,
+ * so a gate that is too low costs little while one that is too high silences the singer.
+ */
+export function gateFor(noiseDb: number, singDb: number | null): number {
+  let g = noiseDb + 6;
+  if (singDb !== null) g = Math.min(g, singDb - 15);
+  return Math.max(-65, Math.min(-48, g));
+}
+
 type Step = 'intro' | 'silence' | 'leak' | 'sing' | 'done';
 
 export default function CalibrationWizard({ onDone, compact }: { onDone: (c: MicCalibration) => void; compact?: boolean }) {
@@ -88,7 +99,7 @@ export default function CalibrationWizard({ onDone, compact }: { onDone: (c: Mic
 
   function finish() {
     const noiseDb = noise ?? -70;
-    const gateDb = Math.max(noiseDb + 8, -58);
+    const gateDb = gateFor(noiseDb, singLevel);
     const cal: MicCalibration = {
       date: Date.now(),
       noiseFloorDb: Math.round(noiseDb * 10) / 10,
