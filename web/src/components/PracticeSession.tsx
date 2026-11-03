@@ -61,7 +61,8 @@ export default function PracticeSession(props: PracticeSessionProps) {
   const [phraseIndex, setPhraseIndex] = useState(Math.min(props.initialPhrase ?? 0, Math.max(0, phrases.length - 1)));
   const [tempo, setTempo] = useState(1);
   const [loop, setLoop] = useState(false);
-  const [mode, setMode] = useState<'phrase' | 'full'>('phrase');
+  const [mode, setMode] = useState<'phrase' | 'full'>(props.exercise ? 'phrase' : 'full');
+  const [startAt, setStartAt] = useState(0); // phrase index where sing-along starts
   const defaultBacking: Backing = exercise ? 'guide' : hasStems ? 'instrumental+guide' : hasOriginal ? 'original+guide' : 'guide';
   const [backing, setBacking] = useState<Backing>(defaultBacking);
   const [step, setStep] = useState<Step>('idle');
@@ -362,12 +363,12 @@ export default function PracticeSession(props: PracticeSessionProps) {
     framesRef.current = [];
     lastTRef.current = -1;
     const { gains, guide } = gainsFor(backing === 'vocals' ? 'original' : backing, false);
-    const from = Math.max(0, (phrases[0]?.start ?? 0) - 2);
+    const from = Math.max(0, (phrases[startAt]?.start ?? 0) - 2);
     const to = analysis.duration;
     takeStartRef.current = from;
     setMode('full');
     setStep('fullrun');
-    setStatus('Full run. Sing the whole song; every phrase is scored at the end.');
+    setStatus('Sing with the song. White circle = where to sing now. Coloured dot = your voice. Move your voice onto the bars.');
     startRecorder();
     await player.play({
       from,
@@ -393,6 +394,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
     const lastT = frames.length ? frames[frames.length - 1].t : 0;
     for (const p of phrases) {
       if (p.start > lastT) break; // stopped early: only score what was sung
+      if (p.end < takeStartRef.current) continue; // started later in the song
       const sc = scorePhrase(analysis, p, frames, { semitones, level, allowOctave });
       per.push({ phraseIndex: p.index, score: sc });
       const w = p.end - p.start;
@@ -459,6 +461,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
       if (e.code === 'Space') {
         e.preventDefault();
         if (step === 'singing' || step === 'listening' || step === 'fullrun' || step === 'replaying') stop();
+        else if (mode === 'full') fullRun();
         else sing();
       } else if (e.key === 'l' || e.key === 'L') listen();
       else if (e.key === 'ArrowRight') setPhraseIndex((i) => Math.min(phrases.length - 1, i + 1));
@@ -467,7 +470,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, phrase, backing, tempo, loop, semitones]);
+  }, [step, phrase, backing, tempo, loop, semitones, mode, startAt]);
 
   const busy = step === 'singing' || step === 'listening' || step === 'fullrun' || step === 'replaying';
   const getTime = useCallback(() => player.position(), []);
@@ -522,11 +525,11 @@ export default function PracticeSession(props: PracticeSessionProps) {
         <div className="row">
           {!exercise && (
             <div className="seg" title="Practise phrase by phrase, or sing the whole song">
-              <button className={mode === 'phrase' ? 'active' : ''} onClick={() => setMode('phrase')} disabled={busy}>
-                Phrases
-              </button>
               <button className={mode === 'full' ? 'active' : ''} onClick={() => setMode('full')} disabled={busy}>
-                Full run
+                Sing along
+              </button>
+              <button className={mode === 'phrase' ? 'active' : ''} onClick={() => setMode('phrase')} disabled={busy}>
+                Learn phrase by phrase
               </button>
             </div>
           )}
@@ -635,6 +638,29 @@ export default function PracticeSession(props: PracticeSessionProps) {
             />
           </div>
 
+          <div className="legend" style={{ padding: '0 4px' }}>
+            <span>
+              <i style={{ background: '#818cf8' }} />
+              the correct notes
+            </span>
+            <span>
+              <i style={{ background: 'transparent', border: '2px solid var(--ink)', borderRadius: '50%' }} />
+              where to sing now
+            </span>
+            <span>
+              <i style={{ background: '#22c55e', borderRadius: '50%' }} />
+              your voice: green on the note
+            </span>
+            <span>
+              <i style={{ background: '#f59e0b', borderRadius: '50%' }} />
+              close
+            </span>
+            <span>
+              <i style={{ background: '#ef4444', borderRadius: '50%' }} />
+              off
+            </span>
+          </div>
+
           {/* transport */}
           <div className="row between card flat" style={{ padding: '12px 14px' }}>
             <div className="row">
@@ -664,13 +690,26 @@ export default function PracticeSession(props: PracticeSessionProps) {
                   ■ Stop
                 </button>
               ) : (
-                <button className="big primary" onClick={fullRun}>
-                  ● Sing the whole song
-                </button>
+                <>
+                  <button className="big primary" onClick={fullRun}>
+                    ● Sing along
+                  </button>
+                  <label className="row small" style={{ gap: 6 }}>
+                    <span className="muted">from</span>
+                    <select value={startAt} onChange={(e) => setStartAt(parseInt(e.target.value, 10))} style={{ width: 'auto', padding: '6px 10px' }}>
+                      <option value={0}>the beginning</option>
+                      {phrases.slice(1).map((p) => (
+                        <option key={p.index} value={p.index}>
+                          {fmtTime(p.start)} {p.text ? `· ${p.text.slice(0, 28)}` : `· phrase ${p.index + 1}`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </>
               )}
             </div>
             <div className="muted small">
-              {status || (mode === 'phrase' ? 'Listen first, then sing. Space = sing/stop, L = listen.' : 'Sing the whole song in one take.')}
+              {status || (mode === 'phrase' ? 'Listen first, then sing. Space = sing/stop, L = listen.' : 'The song plays and the bars scroll. Sing along and steer your dot onto the bars.')}
               {loop && step === 'singing' && ` Pass ${iteration + 1}.`}
             </div>
           </div>
@@ -693,7 +732,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
           {fullResult && mode === 'full' && (
             <div className="card col fade-in">
               <div className="row between">
-                <h2>Full run</h2>
+                <h2>Sing-along results</h2>
                 <ScoreRing value={fullResult.overall} label="overall" />
               </div>
               <table className="table">

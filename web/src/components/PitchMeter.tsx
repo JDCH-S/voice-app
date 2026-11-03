@@ -33,6 +33,15 @@ export default function PitchMeter({ frame, targetMidi, tolerance = 50 }: { fram
           {voiced ? `${cents > 0 ? '+' : ''}${Math.round(cents)}¢` : 'silence'}
         </div>
       </div>
+      {targetMidi !== undefined && targetMidi !== null && (
+        <div style={{ fontWeight: 800, fontSize: '1.25rem', color: !voiced ? 'var(--muted)' : status === 'on' ? 'var(--good)' : status === 'near' ? 'var(--near)' : 'var(--bad)' }}>
+          {!voiced
+            ? `Sing ${midiToName(targetMidi)}`
+            : status === 'on'
+              ? '✓ On the note'
+              : `${cents < 0 ? '▲ Go higher' : '▼ Go lower'}${Math.abs(cents) >= 100 ? ` (${Math.round(Math.abs(cents) / 100)} semitone${Math.round(Math.abs(cents) / 100) === 1 ? '' : 's'})` : ' a little'}`}
+        </div>
+      )}
       <div className="meter">
         <span className="zero" />
         {voiced && <span className="needle" style={{ left: `${left}%` }} />}

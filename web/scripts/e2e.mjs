@@ -92,6 +92,7 @@ if (expectServer) {
 }
 await page.click('text=Analyse and start learning');
 await page.waitForURL(/\/practice\//, { timeout: 120000 });
+await page.click('.seg button:has-text("Learn phrase by phrase")');
 await page.waitForSelector('.phrase-strip button');
 const phraseCount = await page.locator('.phrase-strip button').count();
 log('fallback analysis done, phrases:', phraseCount);
@@ -141,8 +142,8 @@ if (expectServer) {
 await page.click('button:has-text("Listen")');
 await page.waitForTimeout(1500);
 await page.screenshot({ path: path.join(shots, '06-listening.png') });
-await page.waitForSelector('button:has-text("Sing")', { timeout: 20000 });
-await page.click('button:has-text("Sing")');
+await page.waitForSelector('button.big.primary:has-text("● Sing")', { timeout: 20000 });
+await page.click('button.big.primary:has-text("● Sing")');
 await page.waitForTimeout(1200);
 await page.screenshot({ path: path.join(shots, '07-singing.png') });
 await page.waitForSelector('text=One thing to change', { timeout: 30000 });
@@ -154,7 +155,7 @@ log('phrase scored:', fb, '| tip:', tip);
 
 // Loop mode: two passes then stop
 await page.check('text=Loop the phrase');
-await page.click('button:has-text("Sing")');
+await page.click('button.big.primary:has-text("● Sing")');
 await page.waitForTimeout(9000);
 await page.click('button:has-text("Stop")');
 await page.waitForTimeout(500);
@@ -164,13 +165,14 @@ await page.screenshot({ path: path.join(shots, '09-loop.png') });
 await page.click('.seg button:has-text("70%")');
 await page.selectOption('select', { index: 9 }); // -2 semitones
 await page.click('button:has-text("Listen")');
-await page.waitForSelector('button:has-text("Sing")', { timeout: 30000 });
+await page.waitForSelector('button.big.primary:has-text("● Sing")', { timeout: 30000 });
 log('70% speed and transposed listen completed');
 
 // Full run
-await page.click('.seg button:has-text("Full run")');
-await page.click('button:has-text("Sing the whole song")');
+await page.click('.seg button:has-text("Sing along")');
+await page.click('button:has-text("● Sing along")');
 await page.waitForTimeout(3000);
+await page.screenshot({ path: path.join(shots, '10a-singalong.png') });
 await page.click('button:has-text("Stop")');
 await page.waitForSelector('text=Practise the weakest phrase', { timeout: 10000 });
 await page.screenshot({ path: path.join(shots, '10-fullrun.png') });
@@ -182,7 +184,7 @@ await page.waitForSelector("text=Today's warm-up");
 await page.screenshot({ path: path.join(shots, '11-exercises.png') });
 await page.goto(baseUrl + '/exercise/pitch-match');
 await page.waitForSelector('.phrase-strip button');
-await page.click('button:has-text("Sing")');
+await page.click('button.big.primary:has-text("● Sing")');
 await page.waitForSelector('text=One thing to change', { timeout: 30000 });
 await page.screenshot({ path: path.join(shots, '12-exercise.png') });
 log('exercise rep scored');

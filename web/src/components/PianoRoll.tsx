@@ -138,6 +138,11 @@ function render(ctx: CanvasRenderingContext2D, W: number, H: number, p: PianoRol
     ctx.fillText('˅', xOf(b) - 3, topPad + 10);
   }
 
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(gutter, topPad, W - gutter, plotH);
+  ctx.clip();
+
   // reference melody line (f0 frames), faint
   const mel = analysis.melody;
   const i0 = Math.max(0, Math.floor((left - mel.t0) / mel.hop));
@@ -155,6 +160,8 @@ function render(ctx: CanvasRenderingContext2D, W: number, H: number, p: PianoRol
     const midi = 69 + 12 * Math.log2(hz / 440) + semitones;
     const x = xOf(mel.t0 + i * mel.hop);
     const y = yOf(midi);
+    const prevHz = i > 0 ? mel.hz[i - 1] : 0;
+    if (pen && prevHz && Math.abs(12 * Math.log2(hz / prevHz)) > 3) pen = false; // don't draw jumps as streaks
     if (!pen) {
       ctx.moveTo(x, y);
       pen = true;
@@ -217,18 +224,24 @@ function render(ctx: CanvasRenderingContext2D, W: number, H: number, p: PianoRol
       ctx.stroke();
     }
     // dynamic tag on notable notes
-    if (inPhrase && (n.dynamic === 'ff' || n.dynamic === 'pp' || n.dynamic === 'f' || n.dynamic === 'p') && x1 - x0 > 26) {
+    if (analysis.mode === 'separated' && inPhrase && (n.dynamic === 'ff' || n.dynamic === 'pp' || n.dynamic === 'f' || n.dynamic === 'p') && x1 - x0 > 26) {
       ctx.fillStyle = 'rgba(255,255,255,0.55)';
       ctx.font = 'italic 600 11px serif';
       ctx.fillText(n.dynamic, x0 + 4, y - h / 2 - 2);
       ctx.font = '600 13px system-ui';
     }
-    // lyric
+    // lyric (below the plot, outside the clip region)
     if (n.lyric && x0 > lastLyricX + 6 && x0 >= gutter - 2) {
+      ctx.restore();
       ctx.fillStyle = inPhrase ? '#e9ecf5' : 'rgba(233,236,245,0.45)';
       const text = n.lyric;
       ctx.fillText(text, x0, H - 12);
       lastLyricX = x0 + ctx.measureText(text).width;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(gutter, topPad, W - gutter, plotH);
+      ctx.clip();
+      ctx.font = '600 13px system-ui';
     }
   }
 
@@ -290,6 +303,60 @@ function render(ctx: CanvasRenderingContext2D, W: number, H: number, p: PianoRol
       prevX = x;
       prevY = y;
       prevT = f.t;
+    }
+  }
+
+  ctx.restore();
+
+  // live cursor at the playhead: a white ring where you should be, a coloured dot where you are
+  if (live !== null) {
+    const x = xOf(live);
+    const clampY = (y: number) => Math.max(topPad + 8, Math.min(topPad + plotH - 8, y));
+    const tgtNote = analysis.notes.find((n) => live >= n.start && live <= n.end);
+    const tgt = tgtNote ? tgtNote.midi + semitones + tgtNote.cents / 100 : null;
+    const last = frames.length ? frames[frames.length - 1] : null;
+    const fresh = !!last && Math.abs(last.t - live) < 0.3 && last.hz > 0 && last.clarity >= 0.5;
+    if (tgt !== null) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(x, yOf(tgt), 10, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    if (fresh && last) {
+      let m = last.midi;
+      let err: number | null = null;
+      if (tgt !== null) {
+        err = (m - tgt) * 100;
+        if (p.allowOctave) {
+          const oct = Math.round(err / 1200);
+          err -= oct * 1200;
+          m -= oct * 12;
+        }
+      }
+      const cls = err === null ? 'none' : Math.abs(err) <= tol ? 'on' : Math.abs(err) <= tol * 2 ? 'near' : 'off';
+      const color = cls === 'on' ? '#22c55e' : cls === 'near' ? '#f59e0b' : cls === 'off' ? '#ef4444' : '#cbd5e1';
+      const y = clampY(yOf(m));
+      if (tgt !== null && err !== null && Math.abs(err) > tol) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x, clampY(yOf(tgt)));
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.font = '700 13px system-ui';
+        ctx.fillStyle = color;
+        ctx.fillText(err < 0 ? '▲ higher' : '▼ lower', x + 14, y + 4);
+      }
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x, y, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#121626';
+      ctx.lineWidth = 2;
+      ctx.stroke();
     }
   }
 
