@@ -1,10 +1,13 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
 import type {
   AudioAsset,
+  CoachThread,
   ExerciseResult,
+  GameResult,
   PhraseAttempt,
   Profile,
   RecordingRecord,
+  ReviewState,
   SessionRecord,
   SongRecord,
 } from '../types';
@@ -18,14 +21,29 @@ interface VoiceDB extends DBSchema {
   sessions: { key: string; value: SessionRecord; indexes: { byStart: number } };
   exerciseResults: { key: string; value: ExerciseResult; indexes: { byDate: number; byExercise: string } };
   settings: { key: string; value: { key: string; value: unknown } };
+  games: { key: string; value: GameResult; indexes: { bySong: string; byDate: number } };
+  coachThreads: { key: string; value: CoachThread; indexes: { byUpdated: number } };
+  reviews: { key: string; value: ReviewState & { id: string }; indexes: { bySong: string; byDue: number } };
 }
 
 let dbp: Promise<IDBPDatabase<VoiceDB>> | null = null;
 
 export function db(): Promise<IDBPDatabase<VoiceDB>> {
   if (!dbp) {
-    dbp = openDB<VoiceDB>('voice-coach', 1, {
-      upgrade(d) {
+    dbp = openDB<VoiceDB>('voice-coach', 2, {
+      upgrade(d, oldVersion) {
+        if (oldVersion >= 1) {
+          // v2: karaoke games, coach threads, spaced-review states
+          const games = d.createObjectStore('games', { keyPath: 'id' });
+          games.createIndex('bySong', 'songId');
+          games.createIndex('byDate', 'date');
+          const threads = d.createObjectStore('coachThreads', { keyPath: 'id' });
+          threads.createIndex('byUpdated', 'updatedAt');
+          const reviews = d.createObjectStore('reviews', { keyPath: 'id' });
+          reviews.createIndex('bySong', 'songId');
+          reviews.createIndex('byDue', 'dueAt');
+          return;
+        }
         d.createObjectStore('profile', { keyPath: 'id' });
         const songs = d.createObjectStore('songs', { keyPath: 'id' });
         songs.createIndex('byCreated', 'createdAt');
@@ -42,6 +60,14 @@ export function db(): Promise<IDBPDatabase<VoiceDB>> {
         ex.createIndex('byDate', 'date');
         ex.createIndex('byExercise', 'exerciseId');
         d.createObjectStore('settings', { keyPath: 'key' });
+        const games = d.createObjectStore('games', { keyPath: 'id' });
+        games.createIndex('bySong', 'songId');
+        games.createIndex('byDate', 'date');
+        const threads = d.createObjectStore('coachThreads', { keyPath: 'id' });
+        threads.createIndex('byUpdated', 'updatedAt');
+        const reviews = d.createObjectStore('reviews', { keyPath: 'id' });
+        reviews.createIndex('bySong', 'songId');
+        reviews.createIndex('byDue', 'dueAt');
       },
     });
   }
@@ -88,9 +114,9 @@ export async function saveSong(s: SongRecord): Promise<void> {
 
 export async function deleteSong(id: string): Promise<void> {
   const d = await db();
-  const tx = d.transaction(['songs', 'assets', 'attempts', 'recordings'], 'readwrite');
+  const tx = d.transaction(['songs', 'assets', 'attempts', 'recordings', 'games', 'reviews'], 'readwrite');
   await tx.objectStore('songs').delete(id);
-  for (const store of ['assets', 'attempts', 'recordings'] as const) {
+  for (const store of ['assets', 'attempts', 'recordings', 'games', 'reviews'] as const) {
     const keys = await tx.objectStore(store).index('bySong').getAllKeys(id);
     for (const k of keys) await tx.objectStore(store).delete(k);
   }
@@ -164,9 +190,48 @@ export async function setSetting(key: string, value: unknown): Promise<void> {
   await d.put('settings', { key, value });
 }
 
+export async function saveGame(g: GameResult): Promise<void> {
+  const d = await db();
+  await d.put('games', g);
+}
+
+export async function listGames(songId?: string): Promise<GameResult[]> {
+  const d = await db();
+  if (songId) return d.getAllFromIndex('games', 'bySong', songId);
+  return d.getAllFromIndex('games', 'byDate');
+}
+
+export async function saveCoachThread(t: CoachThread): Promise<void> {
+  const d = await db();
+  await d.put('coachThreads', t);
+}
+
+export async function listCoachThreads(): Promise<CoachThread[]> {
+  const d = await db();
+  return (await d.getAllFromIndex('coachThreads', 'byUpdated')).reverse();
+}
+
+export async function deleteCoachThread(id: string): Promise<void> {
+  const d = await db();
+  await d.delete('coachThreads', id);
+}
+
+export const reviewId = (songId: string, phraseIndex: number) => `${songId}:${phraseIndex}`;
+
+export async function saveReview(r: ReviewState): Promise<void> {
+  const d = await db();
+  await d.put('reviews', { ...r, id: reviewId(r.songId, r.phraseIndex) });
+}
+
+export async function listReviews(songId?: string): Promise<ReviewState[]> {
+  const d = await db();
+  if (songId) return d.getAllFromIndex('reviews', 'bySong', songId);
+  return d.getAllFromIndex('reviews', 'byDue');
+}
+
 export async function wipeAll(): Promise<void> {
   const d = await db();
-  const stores = ['profile', 'songs', 'assets', 'attempts', 'recordings', 'sessions', 'exerciseResults', 'settings'] as const;
+  const stores = ['profile', 'songs', 'assets', 'attempts', 'recordings', 'sessions', 'exerciseResults', 'settings', 'games', 'coachThreads', 'reviews'] as const;
   const tx = d.transaction(stores, 'readwrite');
   for (const s of stores) await tx.objectStore(s).clear();
   await tx.done;

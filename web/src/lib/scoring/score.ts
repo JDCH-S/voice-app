@@ -462,6 +462,21 @@ const TIPS: Record<IssueKind, Tip> = {
     detail: 'You ran out of air or let the tone drop mid-phrase. Take a deeper, lower breath before the phrase and spend it evenly.',
     exerciseId: 'breath-support',
   },
+  breathy: {
+    title: 'Too much air in the tone',
+    detail: 'Your tone is breathy: air is escaping without turning into sound. Bring the vocal folds together gently, like a soft "uh-oh", and sing on a thinner, steadier stream of air. Long tones and lip trills fix this fastest.',
+    exerciseId: 'sustain',
+  },
+  crack: {
+    title: 'The voice flipped',
+    detail: 'The note cracked between chest and head voice. That spot needs a lighter, more connected sound: slide through it slowly on "oo", softly, until the switch disappears.',
+    exerciseId: 'register-transitions',
+  },
+  'out-of-air': {
+    title: 'You ran out of air',
+    detail: 'The note faded and sagged at the end. Take a lower, fuller breath before the phrase and spend it evenly: a long steady hiss trains exactly this.',
+    exerciseId: 'breath-support',
+  },
   strain: {
     title: 'Ease off, you are straining',
     detail: 'Those high notes sound pushed. Lower the key for now and build up with sirens; never force a note that hurts.',

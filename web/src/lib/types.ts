@@ -116,6 +116,11 @@ export interface Profile {
   calibration: MicCalibration | null;
   allowOctave: boolean;
   onboardingDone: boolean;
+  // ---- habit & adaptivity (all optional; defaults applied in code) ----
+  dailyGoalMinutes?: number; // default 10
+  reminderTime?: string | null; // "HH:MM" local, null = off
+  adaptiveDifficulty?: boolean; // default true
+  coachModel?: string | null; // override for the AI coach model
 }
 
 export interface SongRecord {
@@ -132,6 +137,7 @@ export interface SongRecord {
   recommendedSemitones: number;
   jobId: string | null; // pending server job (upgrade to separated when done)
   notesPracticed?: number;
+  words?: WordTiming[] | null; // word-level timing from speech recognition, when available
 }
 
 export interface AudioAsset {
@@ -148,7 +154,23 @@ export interface PitchFrame {
   midi: number; // NaN when unvoiced
   rms: number; // linear 0..1
   db: number;
-  clarity: number; // 0..1
+  clarity: number; // 0..1 periodicity (1 = perfectly periodic)
+  // ---- voice quality (optional; produced by the pitch worklet when available) ----
+  voicing?: number; // 0..1 probability the frame is voiced (after smoothing)
+  hnr?: number; // harmonics-to-noise ratio in dB (breathy voice ≈ < 8, clear ≈ > 15)
+  breathiness?: number; // 0..1 (derived from hnr and spectral tilt)
+  pressed?: number; // 0..1 strain index (bright, loud, high; 1 = clearly pushed)
+  centroid?: number; // spectral centroid in Hz
+  tilt?: number; // spectral tilt in dB/octave (negative; less negative = brighter/pressed)
+  peak?: number; // sample peak 0..1 (clipping ≥ 0.97)
+}
+
+/** One recognised word with its timing in the original recording (from speech recognition). */
+export interface WordTiming {
+  t0: number;
+  t1: number;
+  text: string;
+  conf: number; // 0..1
 }
 
 export type IssueKind =
@@ -167,7 +189,10 @@ export type IssueKind =
   | 'too-loud'
   | 'no-breath'
   | 'broke-line'
-  | 'strain';
+  | 'strain'
+  | 'breathy'
+  | 'crack'
+  | 'out-of-air';
 
 export interface NoteIssue {
   noteId: number;
@@ -256,4 +281,72 @@ export interface ExerciseResult {
   score: number;
   metrics: Record<string, number>;
   notes: string;
+}
+
+// ---------- learning model ----------
+
+export type Mastery = 'new' | 'learning' | 'learned' | 'mastered';
+
+/** Spaced-review state for one phrase of one song. */
+export interface ReviewState {
+  songId: string;
+  phraseIndex: number;
+  mastery: Mastery;
+  bestScore: number;
+  lastScore: number;
+  lastPracticed: number; // epoch ms
+  dueAt: number; // epoch ms: when it should be practised again
+  intervalDays: number;
+}
+
+/** Settings the adaptive engine recommends for the next attempt at a phrase. */
+export interface AdaptiveSettings {
+  tempo: number; // 1, 0.85, 0.7 or 0.5
+  guide: boolean; // guide tone on
+  loop: boolean;
+  reason: string; // one plain sentence for the singer
+}
+
+// ---------- karaoke game ----------
+
+export interface GameResult {
+  id: string;
+  songId: string;
+  date: number;
+  score: number; // 0..100 weighted overall
+  points: number; // running game points
+  stars: number; // 0..5
+  maxCombo: number;
+  semitones: number;
+  tempo: number;
+  perPhrase: { phraseIndex: number; score: number; stars: number }[];
+}
+
+// ---------- AI coach ----------
+
+export interface CoachMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  date: number;
+}
+
+export interface CoachThread {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  title: string;
+  messages: CoachMessage[];
+}
+
+export interface WeeklyPlanDay {
+  day: string; // 'Mon'..'Sun'
+  focus: string;
+  items: { kind: 'exercise' | 'song' | 'phrase' | 'rest' | 'range-test'; title: string; exerciseId?: string | null; songId?: string | null; phraseIndex?: number | null; minutes: number }[];
+}
+
+export interface WeeklyPlan {
+  weekStart: number; // epoch ms (Monday 00:00 local)
+  summary: string;
+  days: WeeklyPlanDay[];
+  source: 'coach' | 'rules';
 }

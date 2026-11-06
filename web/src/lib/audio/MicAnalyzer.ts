@@ -9,6 +9,12 @@ export interface RawPitch {
   rms: number;
   db: number;
   peak: number;
+  voicing?: number;
+  hnr?: number;
+  breathiness?: number;
+  pressed?: number;
+  centroid?: number;
+  tilt?: number;
 }
 
 type Listener = (p: RawPitch) => void;
