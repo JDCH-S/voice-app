@@ -1,4 +1,4 @@
-import type { Level, Profile, RefNote, SongAnalysis, Goal } from '../types';
+import type { Level, Profile, RefNote, SongAnalysis, Goal, IssueKind } from '../types';
 import { midiToHz, nameToMidi, clamp } from '../music/notes';
 import { buildPhrases, dynamicFor } from '../analysis/segment';
 
@@ -284,6 +284,32 @@ export const EXERCISES: Exercise[] = [
     },
   },
   {
+    id: 'clear-tone',
+    name: 'Clear tone',
+    category: 'tone',
+    minutes: 4,
+    summary: 'Short clean "uh-oh" starts, then a held note that stays clear. Turns a breathy tone into sound.',
+    how: ['Say a gentle "uh-oh" and feel the folds close softly at the start of each note.', 'Start each note with that soft click, then keep the tone clear: less air, more buzz.', 'Hold the long note without letting it go airy; stop when it gets breathy and breathe again.'],
+    trains: ['clear tone', 'onsets', 'breath efficiency'],
+    build: (p) => {
+      const r = range(p);
+      const specs: NoteSpec[] = [];
+      let t = 0.5;
+      const beat = p.level === 'beginner' ? 0.7 : 0.55;
+      const hold = p.level === 'beginner' ? 3 : p.level === 'intermediate' ? 4 : 5;
+      for (const base of [r.mid - 3, r.mid, r.mid + 2]) {
+        const m = clamp(base, r.low, r.high);
+        for (let i = 0; i < 4; i++) {
+          specs.push({ midi: m, start: t, end: t + beat * 0.45, lyric: 'uh' });
+          t += beat;
+        }
+        specs.push({ midi: m, start: t, end: t + hold, lyric: 'ah' });
+        t += hold + 2.0;
+      }
+      return { kind: 'pitched', analysis: analysisFromNotes(specs), guideGain: 0.3, drone: null, cue: 'Four soft "uh" starts, then one clear held "ah".' };
+    },
+  },
+  {
     id: 'range-extension',
     name: 'Reach higher',
     category: 'range',
@@ -406,6 +432,32 @@ export function warmupFor(level: Level, goals: Goal[]): Exercise[] {
   if (goals.includes('technique')) ids.push('register-transitions');
   if (level === 'advanced') ids.push('vibrato');
   return ids.map((id) => exerciseById(id)!).filter(Boolean);
+}
+
+/** Exercise that trains the fix for a feedback issue kind (technique issues first). */
+export function exerciseForIssue(kind: IssueKind): Exercise | null {
+  const map: Partial<Record<IssueKind, string>> = {
+    breathy: 'clear-tone',
+    strain: 'sirens',
+    crack: 'register-transitions',
+    'out-of-air': 'breath-support',
+    'broke-line': 'breath-support',
+    short: 'sustain',
+    unstable: 'sustain',
+    flat: 'pitch-match',
+    sharp: 'pitch-match',
+    missed: 'pitch-match',
+    octave: 'range-extension',
+    late: 'onset-precision',
+    early: 'onset-precision',
+    long: 'onset-precision',
+    'no-slide': 'sirens',
+    'no-vibrato': 'vibrato',
+    'too-soft': 'dynamics',
+    'too-loud': 'dynamics',
+    'no-breath': 'breathing',
+  };
+  return exerciseById(map[kind]) ?? null;
 }
 
 /** Exercise suggested for a difficult phrase, from its tags. */
