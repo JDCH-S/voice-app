@@ -156,7 +156,21 @@ export default function PracticeSession(props: PracticeSessionProps) {
         }
         return;
       }
-      const pf: PitchFrame = { t, hz: f.hz, midi: f.midi, rms: f.rms, db: f.db, clarity: f.clarity };
+      const pf: PitchFrame = {
+        t,
+        hz: f.hz,
+        midi: f.midi,
+        rms: f.rms,
+        db: f.db,
+        clarity: f.clarity,
+        voicing: f.voicing,
+        hnr: f.hnr,
+        breathiness: f.breathiness,
+        pressed: f.pressed,
+        centroid: f.centroid,
+        tilt: f.tilt,
+        peak: f.peak,
+      };
       // can we hear the singer at all? judged over the first seconds of each take
       const hs = hearStats.current;
       if (hs.start === 0) hs.start = performance.now();

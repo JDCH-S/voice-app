@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { mic, type RawPitch } from '../lib/audio/MicAnalyzer';
-import { outputLatencySeconds } from '../lib/audio/context';
+import { estimatedLatencyMs, measureLatency, mic, type LatencyResult, type RawPitch } from '../lib/audio/MicAnalyzer';
 import { player } from '../lib/audio/Player';
 import { useMicPitch } from '../lib/useMic';
 import PitchMeter from './PitchMeter';
@@ -18,7 +17,7 @@ export function gateFor(noiseDb: number, singDb: number | null): number {
   return Math.max(-65, Math.min(-48, g));
 }
 
-type Step = 'intro' | 'silence' | 'leak' | 'sing' | 'done';
+type Step = 'intro' | 'silence' | 'leak' | 'sing' | 'delay' | 'done';
 
 export default function CalibrationWizard({ onDone, compact }: { onDone: (c: MicCalibration) => void; compact?: boolean }) {
   const [step, setStep] = useState<Step>('intro');
@@ -30,6 +29,9 @@ export default function CalibrationWizard({ onDone, compact }: { onDone: (c: Mic
   const [leak, setLeak] = useState<boolean | null>(null);
   const [singLevel, setSingLevel] = useState<number | null>(null);
   const [clipped, setClipped] = useState(false);
+  const [latency, setLatency] = useState<LatencyResult | null>(null);
+  const [clickNo, setClickNo] = useState(0);
+  const [measuring, setMeasuring] = useState(false);
   const buf = useRef<RawPitch[]>([]);
 
   useEffect(() => {
@@ -37,7 +39,7 @@ export default function CalibrationWizard({ onDone, compact }: { onDone: (c: Mic
   }, [ready]);
 
   useEffect(() => {
-    if (step === 'intro' || step === 'done') return;
+    if (step === 'intro' || step === 'delay' || step === 'done') return;
     const unsub = mic.subscribe((f) => buf.current.push(f));
     return unsub;
   }, [step]);
@@ -94,6 +96,27 @@ export default function CalibrationWizard({ onDone, compact }: { onDone: (c: Mic
     const lvl = dbs.length ? mean(dbs) : -40;
     setSingLevel(lvl);
     setClipped(fs.some((f) => f.peak > 0.97));
+    setStep('delay');
+  }
+
+  async function runDelay() {
+    setMeasuring(true);
+    setClickNo(0);
+    try {
+      const r = await measureLatency({ clicks: 4, onClick: (k) => setClickNo(k + 1) });
+      setLatency(r);
+    } catch {
+      const est = estimatedLatencyMs();
+      setLatency({ latencyMs: est, measured: false, detected: 0, clicks: 4, offsetsMs: [], message: `The clicks could not be played. Using the estimate of ${est} ms.` });
+    } finally {
+      setMeasuring(false);
+    }
+    setStep('done');
+  }
+
+  function skipDelay() {
+    const est = estimatedLatencyMs();
+    setLatency({ latencyMs: est, measured: false, detected: 0, clicks: 0, offsetsMs: [], message: `Delay not measured. Using the estimate of ${est} ms.` });
     setStep('done');
   }
 
@@ -105,11 +128,12 @@ export default function CalibrationWizard({ onDone, compact }: { onDone: (c: Mic
       noiseFloorDb: Math.round(noiseDb * 10) / 10,
       singingLevelDb: Math.round((singLevel ?? -30) * 10) / 10,
       gateDb: Math.round(gateDb * 10) / 10,
-      latencyMs: Math.round(outputLatencySeconds() * 1000 + 25),
+      latencyMs: latency?.latencyMs ?? estimatedLatencyMs(),
       leakDetected: !!leak,
       deviceLabel: mic.deviceLabel,
     };
     mic.setGate(Math.pow(10, gateDb / 20));
+    mic.setReferenceLevel(singLevel);
     onDone(cal);
   }
 
@@ -123,7 +147,7 @@ export default function CalibrationWizard({ onDone, compact }: { onDone: (c: Mic
         <>
           <p>
             Put your <b>headphones on</b> so the music does not reach the microphone. Then we measure the room noise, check for sound leaking from
-            speakers, and set your singing level. Takes 20 seconds.
+            speakers, set your singing level and measure the sound delay. Takes about 30 seconds.
           </p>
           <button className="primary big" onClick={runSilence}>
             Start the check
@@ -193,6 +217,31 @@ export default function CalibrationWizard({ onDone, compact }: { onDone: (c: Mic
           </div>
         </div>
       )}
+      {step === 'delay' && (
+        <div className="card flat col">
+          <h3>4. Measure the delay</h3>
+          <p className="muted">
+            Sound takes a moment to go from the app to your ears and from your voice back into the app. Knowing that delay keeps your timing scores
+            honest. <b>Take your headphones off</b> (or hold one earcup against the microphone) for five seconds: we play four clicks and time how
+            long they take to reach the microphone. Put the headphones back on afterwards.
+          </p>
+          {measuring ? (
+            <>
+              <div className="bar">
+                <span style={{ width: `${(clickNo / 4) * 100}%` }} />
+              </div>
+              <p className="muted">{clickNo === 0 ? 'Listening to the room…' : `Click ${clickNo} of 4…`}</p>
+            </>
+          ) : (
+            <div className="row">
+              <button className="primary" onClick={runDelay}>
+                Play the clicks
+              </button>
+              <button onClick={skipDelay}>Skip (use an estimate)</button>
+            </div>
+          )}
+        </div>
+      )}
       {step === 'done' && (
         <div className="card flat col">
           <h3>Microphone ready</h3>
@@ -209,13 +258,21 @@ export default function CalibrationWizard({ onDone, compact }: { onDone: (c: Mic
               <div className="tiny muted">Leak</div>
               <b>{leak ? 'detected' : 'none'}</b>
             </div>
+            <div>
+              <div className="tiny muted">Delay</div>
+              <b className="latency-result">
+                {latency?.latencyMs ?? estimatedLatencyMs()} ms {latency?.measured ? '(measured)' : '(estimated)'}
+              </b>
+            </div>
           </div>
+          {latency && <div className={`banner ${latency.measured ? 'good' : 'warn'}`}>{latency.message}</div>}
           {clipped && <div className="banner warn">The signal clipped. Move a little further from the microphone or lower its input gain.</div>}
           {tooQuiet && <div className="banner warn">Your voice is barely louder than the room. Move closer to the microphone or raise its input gain.</div>}
           <div className="row">
             <button className="primary big" onClick={finish}>
               Save and continue
             </button>
+            <button onClick={() => setStep('delay')}>Measure the delay again</button>
             <button onClick={runSilence}>Redo</button>
           </div>
         </div>
