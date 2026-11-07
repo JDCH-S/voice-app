@@ -1,4 +1,4 @@
-import type { Lyrics, LyricLine, SongAnalysis } from '../types';
+import type { Lyrics, LyricLine, SongAnalysis, WordTiming } from '../types';
 
 /** Parse LRC ("[mm:ss.xx] text") or plain text into lyric lines. */
 export function parseLyrics(text: string, source: Lyrics['source'] = 'manual'): Lyrics {
@@ -76,6 +76,95 @@ export function alignLyrics(analysis: SongAnalysis, lyrics: Lyrics | null): Song
     assignWords(analysis, p.noteIds, words(text.replace(/\s\/\s/g, ' ')));
   });
   return analysis;
+}
+
+// ---------- word-level alignment (speech-recognition timing) ----------
+
+/** Seconds of overlap between [a0,a1] and [b0,b1] (0 when disjoint). */
+function overlap(a0: number, a1: number, b0: number, b1: number): number {
+  return Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
+}
+
+/**
+ * Attach recognised words (with their true timing) to the notes and phrases of an analysis.
+ * Each word goes to the note that overlaps it most in time; a word that overlaps no note goes to
+ * the nearest note that starts within 0.3 s of it, otherwise it is kept on the phrase only.
+ * Several words on one note are joined with spaces. Phrase text is the words sung inside the
+ * phrase, in time order. Mutates and returns `analysis`. Falls back to `alignLyrics` when `words`
+ * is empty and `fallback` is given.
+ */
+export function alignWords(analysis: SongAnalysis, words: WordTiming[] | null | undefined, fallback?: Lyrics | null): SongAnalysis {
+  const ws = (words ?? [])
+    .filter((w) => w && isFinite(w.t0) && isFinite(w.t1) && typeof w.text === 'string' && w.text.trim())
+    .map((w) => ({ ...w, text: w.text.trim() }));
+  if (ws.length === 0) return alignLyrics(analysis, fallback ?? null);
+  ws.sort((a, b) => a.t0 - b.t0);
+  const notes = [...analysis.notes].sort((a, b) => a.start - b.start);
+  for (const n of analysis.notes) n.lyric = null;
+  for (const p of analysis.phrases) p.text = '';
+  const perNote = new Map<number, string[]>();
+  const perPhrase = new Map<number, string[]>();
+  let cursor = 0;
+  for (const w of ws) {
+    const t0 = w.t0;
+    const t1 = Math.max(w.t1, w.t0 + 0.02);
+    while (cursor < notes.length && notes[cursor].end < t0 - 0.3) cursor++;
+    let best: (typeof notes)[number] | null = null;
+    let bestOv = 0;
+    let nearest: (typeof notes)[number] | null = null;
+    let nearestD = Infinity;
+    for (let i = cursor; i < notes.length; i++) {
+      const n = notes[i];
+      if (n.start > t1 + 0.3) break;
+      const ov = overlap(t0, t1, n.start, n.end);
+      if (ov > bestOv) {
+        bestOv = ov;
+        best = n;
+      }
+      const d = Math.abs(n.start - t0);
+      if (d < nearestD) {
+        nearestD = d;
+        nearest = n;
+      }
+    }
+    const target = best ?? (nearest && nearestD <= 0.3 ? nearest : null);
+    if (target) {
+      const arr = perNote.get(target.id) ?? [];
+      arr.push(w.text);
+      perNote.set(target.id, arr);
+      const ph = perPhrase.get(target.phrase) ?? [];
+      ph.push(w.text);
+      perPhrase.set(target.phrase, ph);
+    } else {
+      // no note near this word: keep it on the phrase whose span contains it
+      const p = analysis.phrases.find((x) => t0 >= x.start - 0.3 && t0 <= x.end + 0.3);
+      if (p) {
+        const ph = perPhrase.get(p.index) ?? [];
+        ph.push(w.text);
+        perPhrase.set(p.index, ph);
+      }
+    }
+  }
+  for (const [id, arr] of perNote) analysis.notes[id].lyric = arr.join(' ');
+  for (const p of analysis.phrases) p.text = (perPhrase.get(p.index) ?? []).join(' ');
+  return analysis;
+}
+
+/** The recognised word being sung at song time `t` (words sorted by t0), or null. */
+export function wordAt(words: WordTiming[], t: number): WordTiming | null {
+  if (words.length === 0) return null;
+  let lo = 0;
+  let hi = words.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (words[mid].t0 <= t) lo = mid;
+    else hi = mid - 1;
+  }
+  for (let i = Math.max(0, lo - 1); i <= Math.min(words.length - 1, lo + 1); i++) {
+    const w = words[i];
+    if (t >= w.t0 && t <= Math.max(w.t1, w.t0 + 0.05)) return w;
+  }
+  return null;
 }
 
 function assignWords(analysis: SongAnalysis, noteIds: number[], ws: string[]) {

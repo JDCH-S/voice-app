@@ -1,7 +1,7 @@
 // Logic self-test: run with `npx tsx scripts/selftest.ts`
 import { buildAnalysis } from '../src/lib/analysis/segment';
 import { scorePhrase } from '../src/lib/scoring/score';
-import { alignLyrics, parseLyrics } from '../src/lib/analysis/lyrics';
+import { alignLyrics, alignWords, parseLyrics, wordAt } from '../src/lib/analysis/lyrics';
 import { midiToHz, midiToName, median } from '../src/lib/music/notes';
 import type { PitchFrame } from '../src/lib/types';
 import fs from 'node:fs';
@@ -93,6 +93,34 @@ const ly = parseLyrics('[00:00.40] hello my friend\n[00:02.90] reaching the top 
 alignLyrics(analysis, ly);
 check(analysis.phrases[0].text.includes('hello'), `phrase 1 text: "${analysis.phrases[0].text}"`);
 check(analysis.phrases[1].text.includes('top'), `phrase 2 text: "${analysis.phrases[1].text}"`);
+
+// ---- word-level alignment (speech-recognition timing) ----
+{
+  const a2 = structuredClone(analysis);
+  const words = [
+    { t0: 0.52, t1: 0.98, text: 'hel', conf: 0.9 },
+    { t0: 1.02, t1: 1.45, text: 'lo', conf: 0.9 },
+    { t0: 1.55, t1: 2.5, text: 'friend', conf: 0.8 },
+    { t0: 2.75, t1: 2.95, text: 'uh', conf: 0.3 }, // in the breath gap: no note overlaps, nearest note starts 0.05 s later
+    { t0: 3.05, t1: 3.35, text: 'reach', conf: 0.9 },
+    { t0: 3.42, t1: 3.78, text: 'the', conf: 0.9 },
+    { t0: 3.85, t1: 4.9, text: 'top', conf: 0.9 },
+    { t0: 5.58, t1: 5.7, text: 'la', conf: 0.7 },
+    { t0: 5.75, t1: 5.82, text: 'la', conf: 0.7 },
+    { t0: 6.1, t1: 6.9, text: 'down', conf: 0.9 },
+  ];
+  alignWords(a2, words);
+  const byStart = (t: number) => a2.notes.find((n) => Math.abs(n.start - t) < 0.08)!;
+  check(byStart(0.5).lyric === 'hel' && byStart(1.0).lyric === 'lo' && byStart(1.5).lyric === 'friend', `words land on the notes they overlap most (${byStart(0.5).lyric}, ${byStart(1.0).lyric}, ${byStart(1.5).lyric})`);
+  check(byStart(3.0).lyric === 'uh reach', `a word in a gap joins the nearest note within 0.3 s ("${byStart(3.0).lyric}")`);
+  check(byStart(3.8).lyric === 'top', `the slide note gets "top" ("${byStart(3.8).lyric}")`);
+  check(a2.phrases[0].text === 'hel lo friend' && a2.phrases[1].text === 'uh reach the top', `phrase texts from words: "${a2.phrases[0].text}" / "${a2.phrases[1].text}"`);
+  check(a2.phrases[2].text.startsWith('la la') && a2.phrases[2].text.endsWith('down'), `run phrase text: "${a2.phrases[2].text}"`);
+  const empty = structuredClone(analysis);
+  alignWords(empty, [], ly);
+  check(empty.phrases[0].text.includes('hello'), 'alignWords with no words falls back to the line-based aligner');
+  check(wordAt(words, 3.9)?.text === 'top' && wordAt(words, 2.6) === null && wordAt(words, 6.5)?.text === 'down', 'wordAt finds the word being sung');
+}
 
 // ---- simulated singers ----
 function sing(opts: { cents?: number; late?: number; shortRatio?: number; skipNote?: number; noSlide?: boolean; octave?: number; frameDt?: number }): PitchFrame[] {

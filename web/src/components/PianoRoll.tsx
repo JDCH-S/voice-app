@@ -1,7 +1,16 @@
 import { useEffect, useRef } from 'react';
-import type { Level, NoteResult, PitchFrame, SongAnalysis } from '../lib/types';
+import type { Level, NoteResult, PitchFrame, SongAnalysis, WordTiming } from '../lib/types';
 import { midiToName, NOTE_NAMES } from '../lib/music/notes';
 import { tolerances } from '../lib/scoring/score';
+
+/** A burst of stars over a phrase that just finished in game mode. `at` is performance.now() when it was awarded. */
+export interface StarPop {
+  phraseIndex: number;
+  stars: number;
+  at: number;
+}
+
+export const STAR_POP_MS = 1600;
 
 export interface PianoRollProps {
   analysis: SongAnalysis;
@@ -18,6 +27,10 @@ export interface PianoRollProps {
   allowOctave?: boolean;
   /** when true, follow the playhead; when false, keep the phrase in view */
   follow?: boolean;
+  /** word-level timing: words are drawn at their true time and the current one is highlighted */
+  words?: WordTiming[] | null;
+  /** game mode: star bursts over phrases that just finished */
+  starPops?: React.MutableRefObject<StarPop[]>;
 }
 
 const WHITE = new Set([0, 2, 4, 5, 7, 9, 11]);
@@ -171,6 +184,7 @@ function render(ctx: CanvasRenderingContext2D, W: number, H: number, p: PianoRol
 
   // reference notes
   const results = p.results;
+  const hasWords = !!p.words && p.words.length > 0;
   ctx.font = '600 13px system-ui';
   let lastLyricX = -Infinity;
   for (const n of analysis.notes) {
@@ -230,8 +244,8 @@ function render(ctx: CanvasRenderingContext2D, W: number, H: number, p: PianoRol
       ctx.fillText(n.dynamic, x0 + 4, y - h / 2 - 2);
       ctx.font = '600 13px system-ui';
     }
-    // lyric (below the plot, outside the clip region)
-    if (n.lyric && x0 > lastLyricX + 6 && x0 >= gutter - 2) {
+    // lyric (below the plot, outside the clip region); with word timing the words are drawn separately
+    if (!hasWords && n.lyric && x0 > lastLyricX + 6 && x0 >= gutter - 2) {
       ctx.restore();
       ctx.fillStyle = inPhrase ? '#e9ecf5' : 'rgba(233,236,245,0.45)';
       const text = n.lyric;
@@ -307,6 +321,93 @@ function render(ctx: CanvasRenderingContext2D, W: number, H: number, p: PianoRol
   }
 
   ctx.restore();
+
+  // word-level lyrics at their true time; the word being sung now is highlighted
+  if (hasWords) {
+    const words = p.words!;
+    const bandY = H - 12;
+    const curT = live ?? t;
+    ctx.font = '600 13px system-ui';
+    let lastX = -Infinity;
+    // binary search for the first word that could be visible
+    let lo = 0;
+    let hi = words.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (words[mid].t1 < left - 1) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let i = lo; i < words.length; i++) {
+      const w = words[i];
+      if (w.t0 > right + 1) break;
+      const x0 = xOf(w.t0);
+      if (x0 < gutter - 2) continue;
+      const current = curT >= w.t0 && curT <= Math.max(w.t1, w.t0 + 0.05);
+      const past = curT > Math.max(w.t1, w.t0 + 0.05);
+      const inPhrase = !p.phrase || (w.t1 >= p.phrase.start - 0.3 && w.t0 <= p.phrase.end + 0.3);
+      if (x0 <= lastX + 5 && !current) continue; // keep the band readable: skip overlapping words
+      const text = w.text;
+      const tw = ctx.measureText(text).width;
+      if (current) {
+        // progress fill under the word, then the word in white
+        const x1 = Math.max(x0 + 6, xOf(Math.max(w.t1, w.t0 + 0.05)));
+        const frac = Math.max(0, Math.min(1, (curT - w.t0) / Math.max(0.05, w.t1 - w.t0)));
+        ctx.fillStyle = 'rgba(129, 140, 248, 0.35)';
+        roundRect(ctx, x0 - 4, bandY - 14, Math.max(tw + 8, x1 - x0 + 8), 20, 6);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(165, 180, 252, 0.95)';
+        ctx.fillRect(x0 - 4, bandY + 4, Math.max(tw + 8, x1 - x0 + 8) * frac, 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '800 14px system-ui';
+        ctx.fillText(text, x0, bandY);
+        ctx.font = '600 13px system-ui';
+      } else {
+        ctx.fillStyle = !inPhrase ? 'rgba(233,236,245,0.35)' : past ? 'rgba(199, 210, 254, 0.75)' : '#e9ecf5';
+        ctx.fillText(text, x0, bandY);
+      }
+      lastX = x0 + tw;
+    }
+  }
+
+  // game mode: stars popping over phrases that just finished
+  const pops = p.starPops?.current;
+  if (pops && pops.length) {
+    const now = performance.now();
+    for (const pop of pops) {
+      const age = now - pop.at;
+      if (age < 0 || age > STAR_POP_MS) continue;
+      const ph = analysis.phrases[pop.phraseIndex];
+      if (!ph) continue;
+      const ns = ph.noteIds.map((id) => analysis.notes[id]).filter(Boolean);
+      if (!ns.length) continue;
+      const cx = xOf((ph.start + ph.end) / 2);
+      if (cx < gutter - 40 || cx > W + 40) continue;
+      const topMidi = Math.max(...ns.map((n) => n.midi)) + semitones;
+      const k = age / STAR_POP_MS;
+      const rise = 26 * k;
+      const scale = k < 0.25 ? 0.6 + 1.6 * (k / 0.25) : k < 0.45 ? 1.0 + 0.2 * (1 - (k - 0.25) / 0.2) : 1.0;
+      const alpha = k < 0.7 ? 1 : 1 - (k - 0.7) / 0.3;
+      const cy = Math.max(topPad + 26, yOf(topMidi) - laneH - rise);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(cx, cy);
+      ctx.scale(scale, scale);
+      ctx.textAlign = 'center';
+      ctx.font = '800 20px system-ui';
+      const txt = '★'.repeat(Math.max(0, pop.stars)) + '☆'.repeat(Math.max(0, 5 - pop.stars));
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = 'rgba(18, 22, 38, 0.9)';
+      ctx.strokeText(txt, 0, 0);
+      ctx.fillStyle = pop.stars >= 4 ? '#fbbf24' : pop.stars >= 2 ? '#fcd34d' : '#cbd5e1';
+      ctx.fillText(txt, 0, 0);
+      if (pop.stars >= 5) {
+        ctx.font = '800 12px system-ui';
+        ctx.fillStyle = '#fef3c7';
+        ctx.fillText('PERFECT', 0, 16);
+      }
+      ctx.restore();
+    }
+  }
 
   // live cursor at the playhead: a white ring where you should be, a coloured dot where you are
   if (live !== null) {
