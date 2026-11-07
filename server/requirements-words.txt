@@ -1,0 +1,4 @@
+# Optional: word timing with speech recognition (faster-whisper, CPU int8).
+#   pip install -r requirements-words.txt
+# The model (VOICECOACH_WHISPER_MODEL, default "small", ~250 MB) is downloaded from huggingface.co on first use.
+faster-whisper>=1.1

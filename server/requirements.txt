@@ -8,3 +8,4 @@ soundfile>=0.12
 mutagen>=1.47
 httpx>=0.27
 imageio-ffmpeg>=0.5  # bundled ffmpeg, so nothing else needs installing on Windows/Mac
+anthropic>=1.0  # AI coach (Anthropic Messages API); the key is configured at run time
