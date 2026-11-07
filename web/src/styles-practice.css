@@ -1,0 +1,517 @@
+/* Practice experience: voice-quality meter, technique feedback, hear-it-fixed, game mode, word lyrics,
+   and the phone layout (390 px wide and up). Imported from PracticeSession.tsx. */
+
+.ps,
+.ps button,
+.ps select,
+.ps label,
+.ps input {
+  touch-action: manipulation; /* no double-tap zoom on the transport */
+}
+.ps .ps-head {
+  align-items: flex-start;
+}
+.ps .ps-title {
+  min-width: 0;
+}
+.ps .ps-title h1 {
+  overflow-wrap: anywhere;
+}
+
+.ps .ps-select {
+  width: auto;
+  max-width: 100%;
+  padding: 6px 10px;
+}
+
+/* ---- voice-quality meter ---- */
+.vq-wrap {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.vq-row {
+  display: grid;
+  grid-template-columns: minmax(56px, auto) 1fr minmax(56px, auto);
+  align-items: center;
+  gap: 8px;
+}
+.vq-label {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.vq-row .vq-label:last-child {
+  text-align: right;
+}
+.vq-row[data-zone='red'] .vq-label:last-child,
+.vq-row[data-zone='red'] .vq-label:first-child {
+  color: var(--bad);
+}
+.vq-bar {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.vq-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.12s linear, background 0.2s ease, opacity 0.3s ease;
+}
+.vq-mark {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  background: rgba(27, 33, 48, 0.25);
+}
+.vq-hint {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--bad-soft);
+  color: #7a1b1b;
+  line-height: 1.35;
+  animation: fade 0.25s ease;
+}
+.vq-hint.breathy {
+  background: #e0f2fe;
+  color: #0c4a6e;
+}
+.vq.compact .vq-label {
+  font-size: 0.68rem;
+}
+
+/* ---- technique feedback ---- */
+.tech-line {
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--panel-2);
+}
+.tech-line.flagged {
+  background: var(--near-soft);
+  color: #7a4b00;
+}
+.tech-line.clean {
+  color: var(--good);
+  background: var(--good-soft);
+}
+.issue-list li.technique {
+  border-left: 3px solid var(--bad);
+}
+.tech-pill {
+  margin-left: 6px;
+  padding: 1px 7px;
+  font-size: 0.7rem;
+  vertical-align: 1px;
+}
+
+/* ---- adaptive difficulty note ---- */
+.adaptive-note {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: #2d2a8a;
+  border: 1px solid #c7cdfd;
+  animation: fade 0.25s ease;
+}
+.adaptive-icon {
+  font-weight: 800;
+  color: var(--accent);
+}
+
+/* ---- hear it fixed ---- */
+.hif-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.hif-play {
+  justify-content: center;
+  min-height: 44px;
+  padding: 8px 10px;
+  font-size: 0.92rem;
+}
+.hif-play.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.hif-render {
+  min-height: 44px;
+}
+
+/* ---- game mode ---- */
+.roll-wrap.game {
+  box-shadow: 0 0 0 2px #a855f7 inset, 0 8px 30px rgba(168, 85, 247, 0.25);
+}
+.game-tab.active {
+  background: linear-gradient(135deg, #ede9fe, #fce7f3) !important;
+  color: #7e22ce !important;
+}
+.game-hud {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  pointer-events: none;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+.game-points {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 12px;
+  background: rgba(18, 22, 38, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+.game-points-val {
+  font-size: 1.6rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.game-points-label {
+  font-size: 0.75rem;
+  opacity: 0.8;
+}
+.game-combo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(79, 70, 229, 0.75);
+  font-size: 0.8rem;
+  font-weight: 600;
+  animation: pop 0.3s ease;
+}
+.game-combo.hot {
+  background: linear-gradient(90deg, #f97316, #db2777);
+}
+.game-mult {
+  font-size: 1.1rem;
+  font-weight: 800;
+}
+.game-stars-sofar {
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+.game-stars-sofar .star-glyph {
+  color: #fbbf24;
+}
+.game-stars-sofar .tiny {
+  color: rgba(255, 255, 255, 0.7);
+}
+@keyframes pop {
+  0% {
+    transform: scale(0.8);
+  }
+  60% {
+    transform: scale(1.12);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.stars i {
+  font-style: normal;
+  color: #d4d7e0;
+}
+.stars i.on {
+  color: #f59e0b;
+}
+.game-end {
+  background: linear-gradient(135deg, #fdf4ff, #eef2ff);
+  border-color: #e9d5ff;
+}
+.game-end-top {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.game-end-stars {
+  text-align: center;
+}
+.game-end-headline {
+  font-size: 1.6rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-top: 4px;
+  background: linear-gradient(90deg, #7e22ce, #db2777);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.game-end-numbers {
+  display: flex;
+  gap: 22px;
+  flex-wrap: wrap;
+}
+.game-end-numbers > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.game-end-numbers b {
+  font-size: 1.4rem;
+}
+.game-end-numbers .game-end-points {
+  font-size: 2rem;
+  font-variant-numeric: tabular-nums;
+}
+.game-best {
+  margin: 10px 0;
+}
+.game-phrases {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0 14px;
+}
+.game-phrase {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  min-width: 120px;
+  min-height: 44px;
+}
+.game-intro {
+  border-color: #e9d5ff;
+  background: #fdf4ff;
+}
+.ps button.game-start {
+  background: linear-gradient(135deg, #7e22ce, #db2777);
+  border-color: transparent;
+}
+.ps button.game-start:hover {
+  background: linear-gradient(135deg, #6b21a8, #be185d);
+}
+
+/* ---- layout: the columns must never grow to the phrase strip's content width ---- */
+.ps .practice-layout {
+  grid-template-columns: minmax(0, 1fr) 320px;
+}
+@media (max-width: 1150px) {
+  .ps .practice-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.ps .ps-main,
+.ps .ps-side,
+.ps .ps-transport,
+.ps .ps-settings {
+  min-width: 0;
+}
+.ps .phrase-strip {
+  max-width: 100%;
+}
+
+/* ---- tables ---- */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ---- phone layout: everything stacked, 44 px targets, no hover-only controls ---- */
+@media (max-width: 900px) {
+  .ps h1 {
+    font-size: 1.35rem;
+  }
+  .ps .ps-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .ps .ps-modes,
+  .ps .ps-modes .seg {
+    width: 100%;
+  }
+  .ps .ps-modes .seg {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: 1fr;
+  }
+  .ps .ps-modes .seg button {
+    min-height: 44px;
+    padding: 8px 6px;
+    font-size: 0.85rem;
+    white-space: normal;
+    line-height: 1.15;
+    justify-content: center;
+  }
+  .ps .ps-settings {
+    padding: 10px 12px;
+  }
+  .ps .ps-settings-row {
+    width: 100%;
+    gap: 10px;
+  }
+  .ps .ps-settings-row > label.row {
+    width: 100%;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+  .ps .ps-settings-row > label.row > .muted {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+  }
+  .ps .ps-settings-row .seg {
+    display: flex;
+    flex-wrap: wrap;
+    width: 100%;
+    max-width: 100%;
+  }
+  .ps .ps-settings-row .seg button {
+    flex: 1 1 auto;
+    justify-content: center;
+    min-height: 44px;
+    padding: 6px 10px;
+    white-space: nowrap;
+    border-left: 1px solid var(--line);
+    margin-left: -1px;
+  }
+  .ps .ps-settings-row select,
+  .ps .ps-transport-buttons select {
+    min-height: 44px;
+    width: 100%;
+  }
+  .ps .ps-settings-row > label.toggle {
+    width: 100%;
+    justify-content: space-between;
+    flex-direction: row-reverse;
+  }
+  .ps .banner {
+    flex-wrap: wrap;
+  }
+  .ps .banner > .grow {
+    flex-basis: 100%;
+  }
+  .ps .banner > button,
+  .ps .banner > .btn {
+    min-height: 44px;
+  }
+  .ps .toggle input {
+    width: 22px;
+    height: 22px;
+  }
+  .ps .toggle {
+    min-height: 44px;
+  }
+  .practice-layout {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .ps .roll-wrap {
+    padding: 6px;
+    margin: 0 -4px;
+  }
+  .ps .ps-legend {
+    display: none;
+  }
+  .ps .ps-transport {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    padding: 10px 12px;
+  }
+  .ps .ps-transport-buttons {
+    display: grid;
+    grid-template-columns: 44px 1fr 1fr 44px;
+    gap: 8px;
+    width: 100%;
+  }
+  .ps .ps-transport-buttons > button {
+    min-height: 48px;
+    justify-content: center;
+    padding: 8px 6px;
+  }
+  .ps .ps-transport-buttons > button.big {
+    font-size: 1.05rem;
+    padding: 10px 8px;
+  }
+  .ps .ps-transport-buttons > label {
+    grid-column: 1 / -1;
+    justify-content: space-between;
+  }
+  .ps .ps-transport-buttons > label select {
+    min-height: 44px;
+    flex: 1;
+  }
+  .ps .ps-transport-buttons > button.big:only-child,
+  .ps .ps-transport-buttons > button.game-start {
+    grid-column: 1 / -1;
+  }
+  .ps .ps-status {
+    text-align: center;
+  }
+  .ps .phrase-strip button {
+    min-height: 44px;
+    min-width: 120px;
+  }
+  .ps .phrase-strip button .txt {
+    max-width: 150px;
+  }
+  .ps .card {
+    padding: 14px 14px;
+  }
+  .ps .big-note {
+    font-size: 2.1rem !important;
+  }
+  .ps .feedback-actions button {
+    min-height: 44px;
+    flex: 1;
+    justify-content: center;
+  }
+  .ps .issue-list li {
+    font-size: 0.88rem;
+  }
+  .game-hud {
+    top: 10px;
+    right: 10px;
+    gap: 4px;
+  }
+  .game-points-val {
+    font-size: 1.25rem;
+  }
+  .game-end-headline {
+    font-size: 1.3rem;
+  }
+  .ps .table {
+    font-size: 0.85rem;
+  }
+  .ps .table th,
+  .ps .table td {
+    padding: 7px 6px;
+  }
+  .ps button:hover,
+  .ps .btn:hover {
+    background: inherit; /* hover is meaningless on touch; keep the active/primary colours */
+  }
+  .ps button.primary:hover {
+    background: var(--accent);
+  }
+}
+
+/* when sing-along and game modes have only one big button, let it breathe on wide screens too */
+.ps-transport-buttons .big {
+  min-height: 48px;
+}

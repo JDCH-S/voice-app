@@ -159,6 +159,23 @@ await page.screenshot({ path: path.join(shots, '08-feedback.png') });
 const fb = await page.locator('.score-ring .val').first().innerText();
 const tip = await page.locator('text=One thing to change').locator('..').locator('h3').innerText();
 log('phrase scored:', fb, '| tip:', tip);
+const vqRows = await page.locator('.vq-row').count();
+log('voice-quality meter rows:', vqRows);
+if (vqRows !== 2) errors.push(`voice-quality meter did not render two bars (got ${vqRows})`);
+
+// Hear it fixed: render the pitch-corrected take, expect the three aligned playback buttons
+await page.click('button:has-text("Hear it fixed")');
+await page.waitForSelector('.hif-buttons', { timeout: 60000 });
+const fixButtons = await page.locator('.hif-buttons button').allInnerTexts();
+log('hear it fixed buttons:', fixButtons.join(' | '));
+if (fixButtons.length !== 3 || !fixButtons.some((t) => /You \(fixed\)/.test(t)) || !fixButtons.some((t) => /Original singer/.test(t))) errors.push(`hear it fixed did not offer You / You (fixed) / Original singer (got ${fixButtons.join(', ')})`);
+const dlButtons = await page.locator('button:has-text("Download my take"), button:has-text("Download fixed")').count();
+if (dlButtons !== 2) errors.push(`expected both download buttons, got ${dlButtons}`);
+await page.click('.hif-buttons button:has-text("You (fixed)")');
+await page.waitForTimeout(1200);
+await page.screenshot({ path: path.join(shots, '08b-hear-it-fixed.png') });
+await page.waitForSelector('.hif-buttons button:has-text("▶ You (fixed)")', { timeout: 30000 });
+log('fixed take played back');
 
 // Loop mode: two passes then stop
 await page.check('text=Loop the phrase');
@@ -174,6 +191,29 @@ await page.selectOption('select', { index: 9 }); // -2 semitones
 await page.click('button:has-text("Listen")');
 await page.waitForSelector('button.big.primary:has-text("● Sing")', { timeout: 30000 });
 log('70% speed and transposed listen completed');
+const adaptiveNote = await page.locator('.adaptive-note').allInnerTexts();
+log('adaptive difficulty note:', adaptiveNote.join(' ').slice(0, 120));
+
+// Then vs now: a second recorded take of phrase 1, then "Compare first and latest" in the takes panel
+await page.uncheck('text=Loop the phrase');
+await page.click('button.big.primary:has-text("● Sing")');
+await page.waitForSelector('text=One thing to change', { timeout: 40000 });
+await page.click('button:has-text("My takes")');
+await page.waitForSelector('.takes-panel');
+const takeRows = await page.locator('.takes-panel tbody tr').count();
+log('recorded takes:', takeRows);
+const compareBtn = page.locator('.compare-btn');
+if (await compareBtn.isEnabled()) {
+  await compareBtn.click();
+  await page.waitForSelector('text=Then:', { timeout: 15000 });
+  await page.screenshot({ path: path.join(shots, '09b-then-vs-now.png') });
+  await page.waitForSelector('text=Now:', { timeout: 40000 });
+  await page.waitForSelector('.compare-btn:enabled', { timeout: 40000 });
+  log('then vs now played both takes');
+} else {
+  errors.push(`compare first and latest was not enabled with ${takeRows} takes`);
+}
+await page.click('button:has-text("My takes")');
 
 // Full run
 await page.click('.seg button:has-text("Sing along")');
@@ -183,7 +223,105 @@ await page.screenshot({ path: path.join(shots, '10a-singalong.png') });
 await page.click('button:has-text("Stop")');
 await page.waitForSelector('text=Practise the weakest phrase', { timeout: 10000 });
 await page.screenshot({ path: path.join(shots, '10-fullrun.png') });
+const techHeader = await page.locator('.table th:has-text("Technique")').count();
+if (techHeader !== 1) errors.push('sing-along table has no Technique column');
 log('full run scored');
+
+// Game mode: full-song karaoke, stopped early, must end with stars (back at full speed in the original key)
+await page.click('.seg button:has-text("Game")');
+await page.waitForSelector('text=Game mode');
+await page.click('.seg button:has-text("100%")');
+await page.selectOption('select', { index: 7 }); // original key
+await page.click('button:has-text("Start the game")');
+await page.waitForSelector('.game-hud', { timeout: 20000 });
+await page.waitForTimeout(6500);
+const hudPoints = await page.locator('.game-points-val').innerText();
+log('game points after 6.5 s:', hudPoints);
+await page.screenshot({ path: path.join(shots, '10b-game.png') });
+await page.click('button:has-text("Stop")');
+await page.waitForSelector('.game-end', { timeout: 15000 });
+const starCount = await page.locator('.game-end-stars .stars i').count();
+const starsOn = await page.locator('.game-end-stars .stars i.on').count();
+const bestLine = await page.locator('.game-best').innerText();
+log(`game ended: ${starsOn}/${starCount} stars | ${bestLine.trim().slice(0, 60)}`);
+if (starCount !== 5) errors.push(`game end screen did not show five star slots (got ${starCount})`);
+if (!/best/i.test(bestLine)) errors.push('game end screen has no best-ever line');
+await page.screenshot({ path: path.join(shots, '10c-game-end.png') });
+const savedGames = await page.evaluate(
+  () =>
+    new Promise((resolve) => {
+      const req = indexedDB.open('voice-coach');
+      req.onsuccess = () => {
+        const tx = req.result.transaction('games');
+        tx.objectStore('games').getAll().onsuccess = (e) => resolve(e.target.result.length);
+      };
+    }),
+);
+log('games saved:', savedGames);
+if (savedGames < 1) errors.push('game result was not saved to the games store');
+const savedReviews = await page.evaluate(
+  () =>
+    new Promise((resolve) => {
+      const req = indexedDB.open('voice-coach');
+      req.onsuccess = () => {
+        const tx = req.result.transaction('reviews');
+        tx.objectStore('reviews').getAll().onsuccess = (e) => resolve(e.target.result.length);
+      };
+    }),
+);
+log('review states saved:', savedReviews);
+if (savedReviews < 1) errors.push('no spaced-review state was saved after phrase attempts');
+
+// Phone layout: 390×844, stacked, no horizontal overflow
+await page.setViewportSize({ width: 390, height: 844 });
+await page.waitForTimeout(600);
+const columnWidth = await page.evaluate(() => document.querySelector('.practice-page').clientWidth);
+if (columnWidth < 300) {
+  // the app shell still shows the desktop sidebar at this width (its phone shell is separate work):
+  // judge the practice page in the column a phone shell gives it
+  log(`note: the app shell leaves the practice page only ${columnWidth} px at 390 px wide; hiding the sidebar for the phone checks`);
+  await page.addStyleTag({ content: '.sidebar{display:none !important}.main{padding:12px 12px 40px !important}' });
+  await page.waitForTimeout(400);
+}
+await page.screenshot({ path: path.join(shots, '16a-mobile-game-end.png'), fullPage: true });
+await page.click('.seg button:has-text("Learn phrase by phrase")');
+await page.waitForTimeout(600);
+await page.screenshot({ path: path.join(shots, '16b-mobile-learn.png') });
+await page.screenshot({ path: path.join(shots, '16c-mobile-learn-full.png'), fullPage: true });
+const mobile = await page.evaluate(() => {
+  const roll = document.querySelector('.roll-wrap canvas');
+  const small = [];
+  for (const b of document.querySelectorAll('.ps button, .ps select')) {
+    const r = b.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0 && r.height < 40) small.push(`${(b.textContent || b.tagName).trim().slice(0, 18)}:${Math.round(r.height)}`);
+  }
+  // the practice page must fit the column it is given; anything wider than that is the app shell's business
+  // (scrollWidth ignores what is inside the strip's and tables' own horizontal scrollers, which is intended scrolling)
+  const pp = document.querySelector('.practice-page');
+  const ppRight = pp.getBoundingClientRect().right;
+  const offenders = [];
+  for (const el of pp.querySelectorAll('*')) {
+    if (el.closest('.phrase-strip, .table-scroll')) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.right > ppRight + 6) offenders.push(`${el.tagName.toLowerCase()}.${String(el.className).slice(0, 30)}:+${Math.round(r.right - ppRight)}`);
+  }
+  return {
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+    practiceWidth: pp.clientWidth,
+    practiceContent: pp.scrollWidth,
+    offenders: offenders.slice(0, 12),
+    rollHeight: roll ? Math.round(roll.getBoundingClientRect().height) : 0,
+    smallTargets: small,
+  };
+});
+log('mobile layout:', JSON.stringify(mobile));
+if (mobile.practiceContent > mobile.practiceWidth + 6) errors.push(`practice content overflows its column on a phone (${mobile.practiceContent} > ${mobile.practiceWidth})`);
+if (mobile.scrollWidth > mobile.clientWidth + 1) log(`note: the whole page is ${mobile.scrollWidth} px wide at 390 px (the app shell's sidebar; the practice column itself fits)`);
+if (mobile.rollHeight < 200 || mobile.rollHeight > 400) errors.push(`mobile roll height ${mobile.rollHeight} is not derived from the viewport`);
+if (mobile.smallTargets.length) errors.push(`mobile touch targets under 40 px: ${mobile.smallTargets.join(', ')}`);
+await page.setViewportSize({ width: 1440, height: 900 });
+await page.waitForTimeout(300);
 
 // Exercises
 await page.goto(baseUrl + '/exercises');

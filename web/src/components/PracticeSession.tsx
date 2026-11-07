@@ -1,16 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CriterionScore, Level, NoteIssue, NoteResult, PitchFrame, SongAnalysis, Tip } from '../lib/types';
+import type { AdaptiveSettings, CriterionScore, GameResult, Level, NoteIssue, NoteResult, PhraseAttempt, PitchFrame, SongAnalysis, Tip, WordTiming } from '../lib/types';
 import { player, type TrackKind } from '../lib/audio/Player';
 import { mic, type RawPitch } from '../lib/audio/MicAnalyzer';
 import { useMicPitch } from '../lib/useMic';
 import { scorePhrase, type PhraseScore } from '../lib/scoring/score';
-import PianoRoll from './PianoRoll';
+import type { TechniqueSummary } from '../lib/scoring/technique';
+import PianoRoll, { STAR_POP_MS, type StarPop } from './PianoRoll';
 import PitchMeter from './PitchMeter';
-import FeedbackPanel from './FeedbackPanel';
+import FeedbackPanel, { worstTechnique } from './FeedbackPanel';
 import ScoreRing from './ScoreRing';
-import { fmtTime, midiToName, transposeKey, keyName } from '../lib/music/notes';
+import VoiceQualityMeter from './practice/VoiceQualityMeter';
+import HearItFixed, { type FixPlayback, type TakeForFix } from './practice/HearItFixed';
+import GameHud, { GameEndScreen, Stars } from './practice/GameHud';
+import { useRollHeight } from './practice/useRollHeight';
+import { fmtTime, midiToName, transposeKey, keyName, uid } from '../lib/music/notes';
 import { exerciseForTags } from '../lib/exercises/library';
+import { defaultSettings, nextSettings } from '../lib/adaptive';
+import { KaraokeScorer, bestGame, type GameOutcome } from '../lib/game';
+import { listGames, saveGame } from '../lib/store/db';
+import { useApp } from '../lib/AppContext';
 import { Link } from 'react-router-dom';
+import '../styles-practice.css';
 
 export type Backing = 'original' | 'vocals' | 'instrumental' | 'instrumental+guide' | 'original+guide' | 'guide';
 
@@ -25,6 +35,21 @@ export interface AttemptOut {
   perPhrase?: { phraseIndex: number; score: PhraseScore }[];
   recording?: { blob: Blob; mime: string } | null;
 }
+
+/** A previously saved take to replay: decoded buffer + metadata. */
+export interface ReplayTake {
+  buffer: AudioBuffer;
+  start: number;
+  tempo: number;
+  semitones: number;
+  frames: PitchFrame[];
+  from: number;
+  to: number;
+  /** shown while it plays ("Then: 3 May, scored 61") */
+  label?: string;
+}
+
+export type PracticeMode = 'phrase' | 'full' | 'game';
 
 export interface PracticeSessionProps {
   analysis: SongAnalysis;
@@ -45,41 +70,66 @@ export interface PracticeSessionProps {
   exercise?: { cue: string; guideGain: number } | null;
   initialPhrase?: number;
   banner?: React.ReactNode;
-  /** a previously saved take to replay: decoded buffer + metadata */
-  replayRequest?: { buffer: AudioBuffer; start: number; tempo: number; semitones: number; frames: PitchFrame[]; from: number; to: number } | null;
+  replayRequest?: ReplayTake | null;
   onReplayDone?: () => void;
+  /** Then vs now: play `first` and then `latest` back to back, each with its own trail. */
+  compareRequest?: { first: ReplayTake; latest: ReplayTake } | null;
+  onCompareDone?: () => void;
+  /** Song id: enables Game mode (results are saved to the games store). */
+  songId?: string | null;
+  /** Word-level timing from speech recognition, when the song has it. */
+  words?: WordTiming[] | null;
+  /** Earlier attempts at this song (for adaptive difficulty: only attempts at the current tempo count). */
+  priorAttempts?: PhraseAttempt[];
+  onPhraseChange?: (phraseIndex: number) => void;
+  onModeChange?: (mode: PracticeMode) => void;
 }
 
-type Step = 'idle' | 'listening' | 'singing' | 'review' | 'replaying' | 'fullrun';
+type Step = 'idle' | 'listening' | 'singing' | 'review' | 'replaying' | 'fullrun' | 'game';
 
 const TEMPOS = [1, 0.85, 0.7, 0.5];
 const PREROLL = 1.2;
 
+const hasGuide = (b: Backing) => b === 'guide' || b.endsWith('+guide');
+
 export default function PracticeSession(props: PracticeSessionProps) {
   const { analysis, level, allowOctave, semitones, hasStems, hasOriginal, exercise } = props;
   const phrases = analysis.phrases;
+  const { profile, updateProfile } = useApp();
+  const adaptiveOn = !exercise && (profile?.adaptiveDifficulty ?? true);
   const [phraseIndex, setPhraseIndex] = useState(Math.min(props.initialPhrase ?? 0, Math.max(0, phrases.length - 1)));
   const [tempo, setTempo] = useState(1);
   const [loop, setLoop] = useState(false);
-  const [mode, setMode] = useState<'phrase' | 'full'>(props.exercise ? 'phrase' : 'full');
+  const [mode, setMode] = useState<PracticeMode>(props.exercise ? 'phrase' : 'full');
   const [startAt, setStartAt] = useState(0); // phrase index where sing-along starts
   const defaultBacking: Backing = exercise ? 'guide' : hasStems ? 'instrumental+guide' : hasOriginal ? 'original+guide' : 'guide';
   const [backing, setBacking] = useState<Backing>(defaultBacking);
   const [step, setStep] = useState<Step>('idle');
   const [preparing, setPreparing] = useState(false);
   const [status, setStatus] = useState<string>('');
-  const [feedback, setFeedback] = useState<{ scores: CriterionScore; issues: NoteIssue[]; tip: Tip; results: Map<number, NoteResult>; title: string } | null>(null);
+  const [feedback, setFeedback] = useState<{ scores: CriterionScore; issues: NoteIssue[]; tip: Tip; results: Map<number, NoteResult>; title: string; technique?: TechniqueSummary } | null>(null);
   const [fullResult, setFullResult] = useState<{ overall: number; perPhrase: { phraseIndex: number; score: PhraseScore }[] } | null>(null);
   const [leakWarn, setLeakWarn] = useState(false);
   const [strainWarn, setStrainWarn] = useState(false);
   const [micWarn, setMicWarn] = useState<null | 'silent' | 'unclear'>(null);
+  const [adaptiveNote, setAdaptiveNote] = useState<string | null>(null);
+  const [lastTake, setLastTake] = useState<(TakeForFix & { kind: 'phrase' | 'full' }) | null>(null);
+  const [fixPlaying, setFixPlaying] = useState<FixPlayback | null>(null);
+  const [gameEnd, setGameEnd] = useState<{ outcome: GameOutcome; best: GameResult | null; isNewBest: boolean } | null>(null);
   const hearStats = useRef({ start: 0, frames: 0, voiced: 0, maxDb: -100 });
   const [iteration, setIteration] = useState(0);
   const { frame } = useMicPitch(true);
+  const { height: rollHeight, phone } = useRollHeight();
 
   const framesRef = useRef<PitchFrame[]>([]); // frames drawn on the roll (current iteration / take)
   const stepRef = useRef<Step>('idle');
   stepRef.current = step;
+  const tempoRef = useRef(tempo);
+  tempoRef.current = tempo;
+  const backingRef = useRef(backing);
+  backingRef.current = backing;
+  const loopRef = useRef(loop);
+  loopRef.current = loop;
   const lastTRef = useRef<number>(-1);
   const iterStartRef = useRef<number>(0);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -88,12 +138,16 @@ export default function PracticeSession(props: PracticeSessionProps) {
   const leakCount = useRef({ hit: 0, total: 0 });
   const guideNotesRef = useRef<{ start: number; end: number; midi: number }[]>([]);
   const takeStartRef = useRef<number>(0);
+  const attemptsRef = useRef<Map<number, PhraseAttempt[]>>(new Map());
+  const scorerRef = useRef<KaraokeScorer | null>(null);
+  const starPopsRef = useRef<StarPop[]>([]);
   const latency = props.latencyMs / 1000;
 
   const phrase = phrases[phraseIndex] ?? null;
   const phraseNotes = useMemo(() => (phrase ? phrase.noteIds.map((id) => analysis.notes[id]) : []), [phrase, analysis]);
   const guideNotes = useMemo(() => analysis.notes.map((n) => ({ start: n.start, end: n.end, midi: n.midi })), [analysis]);
   guideNotesRef.current = guideNotes;
+  const words = useMemo(() => (props.words && props.words.length ? [...props.words].sort((a, b) => a.t0 - b.t0) : null), [props.words]);
 
   useEffect(() => {
     const unsub = player.subscribe(() => setPreparing(player.preparing));
@@ -103,14 +157,75 @@ export default function PracticeSession(props: PracticeSessionProps) {
     };
   }, []);
 
+  // earlier attempts feed the adaptive engine
+  useEffect(() => {
+    const m = new Map<number, PhraseAttempt[]>();
+    for (const a of [...(props.priorAttempts ?? [])].sort((x, y) => x.date - y.date)) {
+      const list = m.get(a.phraseIndex) ?? [];
+      list.push(a);
+      m.set(a.phraseIndex, list);
+    }
+    // keep attempts made in this session
+    for (const [k, list] of attemptsRef.current) {
+      const prev = m.get(k) ?? [];
+      const ids = new Set(prev.map((a) => a.id));
+      m.set(k, [...prev, ...list.filter((a) => !ids.has(a.id))]);
+    }
+    attemptsRef.current = m;
+  }, [props.priorAttempts]);
+
+  // the level decides where a song starts (advanced: full speed, no guide) when auto-adjust is on
+  const defaultsApplied = useRef(false);
+  useEffect(() => {
+    if (defaultsApplied.current || exercise || !profile) return;
+    defaultsApplied.current = true;
+    if (!(profile.adaptiveDifficulty ?? true)) return;
+    // tempo and guide come from the level; looping stays the singer's own choice
+    const d = defaultSettings(level);
+    setTempo(d.tempo);
+    setBacking((b) => withGuide(b, d.guide));
+    setAdaptiveNote(
+      d.tempo < 1
+        ? `Starting at ${Math.round(d.tempo * 100)}% with the guide tone on. We adjust the speed and the guide from your scores after each take.`
+        : d.guide
+          ? 'Starting at full speed with the guide tone on. We adjust after each take.'
+          : 'Full speed, no guide tone: show me what you have got. We adjust after each take.',
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile, level, exercise]);
+
+  useEffect(() => {
+    props.onPhraseChange?.(phraseIndex);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phraseIndex]);
+  useEffect(() => {
+    props.onModeChange?.(mode);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
+
   // reset when phrase changes
   useEffect(() => {
     player.stop();
     setStep('idle');
     setFeedback(null);
+    setLastTake(null);
+    setFixPlaying(null);
     framesRef.current = [];
     setIteration(0);
   }, [phraseIndex, semitones]);
+
+  function withGuide(b: Backing, on: boolean): Backing {
+    if (on) {
+      if (b === 'instrumental') return 'instrumental+guide';
+      if (b === 'original') return 'original+guide';
+      if (b === 'vocals') return hasStems ? 'instrumental+guide' : 'guide';
+      return b;
+    }
+    if (b === 'instrumental+guide') return 'instrumental';
+    if (b === 'original+guide') return 'original';
+    if (b === 'guide') return hasStems ? 'instrumental' : hasOriginal ? 'original' : 'guide';
+    return b;
+  }
 
   const gainsFor = useCallback(
     (b: Backing, forListen: boolean): { gains: Partial<Record<TrackKind, number>>; guide: boolean } => {
@@ -137,11 +252,14 @@ export default function PracticeSession(props: PracticeSessionProps) {
     [hasStems, hasOriginal],
   );
 
-  // ---- microphone frames → song time, live drawing, loop detection ----
+  /** Accompaniment for replaying a take: the band (or the song, quietly) under the singer's voice. */
+  const replayGains = useCallback((): Partial<Record<TrackKind, number>> => (hasStems ? { instrumental: 0.5, vocals: 0.35 } : hasOriginal ? { original: 0.5 } : {}), [hasStems, hasOriginal]);
+
+  // ---- microphone frames → song time, live drawing, loop detection, game scoring ----
   useEffect(() => {
     const unsub = mic.subscribe((f: RawPitch) => {
       const st = stepRef.current;
-      if (st !== 'singing' && st !== 'listening' && st !== 'fullrun') return;
+      if (st !== 'singing' && st !== 'listening' && st !== 'fullrun' && st !== 'game') return;
       const t = player.songTimeAt(f.tCtx - latency);
       if (t === null) return;
       if (st === 'listening') {
@@ -193,6 +311,15 @@ export default function PracticeSession(props: PracticeSessionProps) {
       }
       lastTRef.current = t;
       framesRef.current.push(pf);
+      // game: feed the scorer, pop stars on finished phrases
+      if (st === 'game' && scorerRef.current) {
+        const events = scorerRef.current.feed(pf);
+        if (events.length) {
+          const now = performance.now();
+          for (const ev of events) if (ev.type === 'phrase') starPopsRef.current.push({ phraseIndex: ev.phraseIndex, stars: ev.stars, at: now });
+          starPopsRef.current = starPopsRef.current.filter((p) => now - p.at < STAR_POP_MS + 200);
+        }
+      }
       // strain heuristic: pushed, clipping high notes
       if (props.highMidi && f.hz > 0 && f.midi >= props.highMidi - 1 && f.peak > 0.95) {
         strainCount.current++;
@@ -203,15 +330,47 @@ export default function PracticeSession(props: PracticeSessionProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [latency, semitones, phraseIndex, tempo, level, allowOctave]);
 
+  /** Remember a phrase attempt for the adaptive engine. */
+  function rememberAttempt(pi: number, sc: PhraseScore, atTempo: number) {
+    const a: PhraseAttempt = {
+      id: uid(),
+      songId: props.songId ?? '',
+      phraseIndex: pi,
+      date: Date.now(),
+      semitones,
+      tempo: atTempo,
+      scores: sc.scores,
+      issues: sc.issues,
+      tip: sc.tip,
+      frames: [],
+      noteResults: sc.noteResults,
+    };
+    const list = attemptsRef.current.get(pi) ?? [];
+    list.push(a);
+    attemptsRef.current.set(pi, list);
+  }
+
+  /** Apply the adaptive engine's recommendation for the next attempt at phrase `pi` (when the toggle is on). */
+  function applyAdaptive(pi: number) {
+    if (!adaptiveOn) return;
+    const current: AdaptiveSettings = { tempo: tempoRef.current, guide: hasGuide(backingRef.current), loop: loopRef.current, reason: '' };
+    const next = nextSettings(attemptsRef.current.get(pi) ?? [], current, level);
+    if (Math.abs(next.tempo - current.tempo) > 1e-6) setTempo(next.tempo);
+    if (next.guide !== current.guide) setBacking(withGuide(backingRef.current, next.guide));
+    if (next.loop !== current.loop) setLoop(next.loop);
+    setAdaptiveNote(next.reason);
+  }
+
   const finishIteration = useCallback(
     (frames: PitchFrame[]) => {
       if (!phrase) return;
       // need to have covered at least half of the phrase in time
       const covered = frames.length ? frames[frames.length - 1].t - Math.max(frames[0].t, phrase.start) : 0;
       if (covered < (phrase.end - phrase.start) * 0.5) return;
-      const sc = scorePhrase(analysis, phrase, frames, { semitones, level, allowOctave });
+      const sc = scorePhrase(analysis, phrase, frames, { semitones, level, allowOctave, highMidi: props.highMidi ?? undefined });
       const results = new Map(sc.noteResults.map((r) => [r.noteId, r]));
-      setFeedback({ scores: sc.scores, issues: sc.issues, tip: sc.tip, results, title: `phrase ${phraseIndex + 1}` });
+      setFeedback({ scores: sc.scores, issues: sc.issues, tip: sc.tip, results, title: `phrase ${phraseIndex + 1}`, technique: sc.technique });
+      rememberAttempt(phraseIndex, sc, tempo);
       props.onActivity?.((phrase.end - phrase.start) / tempo);
       props.onAttempt({
         kind: 'phrase',
@@ -299,6 +458,8 @@ export default function PracticeSession(props: PracticeSessionProps) {
     player.stop();
     hearStats.current = { start: 0, frames: 0, voiced: 0, maxDb: -100 };
     setFeedback(null);
+    setLastTake(null);
+    setFixPlaying(null);
     framesRef.current = [];
     lastTRef.current = -1;
     strainCount.current = 0;
@@ -332,39 +493,63 @@ export default function PracticeSession(props: PracticeSessionProps) {
 
   function scoreTake(frames: PitchFrame[], rec: { blob: Blob; mime: string } | null) {
     if (!phrase) return;
-    const sc = scorePhrase(analysis, phrase, frames, { semitones, level, allowOctave });
+    const atTempo = tempoRef.current;
+    const sc = scorePhrase(analysis, phrase, frames, { semitones, level, allowOctave, highMidi: props.highMidi ?? undefined });
     const results = new Map(sc.noteResults.map((r) => [r.noteId, r]));
-    setFeedback({ scores: sc.scores, issues: sc.issues, tip: sc.tip, results, title: `phrase ${phraseIndex + 1}` });
-    props.onActivity?.((phrase.end - phrase.start) / tempo);
+    setFeedback({ scores: sc.scores, issues: sc.issues, tip: sc.tip, results, title: `phrase ${phraseIndex + 1}`, technique: sc.technique });
+    rememberAttempt(phraseIndex, sc, atTempo);
+    if (rec) {
+      setLastTake({
+        id: uid(),
+        kind: 'phrase',
+        label: `phrase ${phraseIndex + 1}`,
+        blob: rec.blob,
+        mime: rec.mime,
+        frames: frames.slice(),
+        noteResults: sc.noteResults,
+        startSongTime: takeStartRef.current,
+        tempo: atTempo,
+        semitones,
+        from: takeStartRef.current,
+        to: phrase.end + 0.4,
+      });
+    }
+    props.onActivity?.((phrase.end - phrase.start) / atTempo);
     props.onAttempt({
       kind: 'phrase',
       phraseIndex,
       score: sc,
       frames: frames.slice(),
-      tempo,
+      tempo: atTempo,
       semitones,
       startSongTime: takeStartRef.current,
       recording: rec,
     });
+    applyAdaptive(phraseIndex);
   }
 
   async function stop() {
     const st = step;
     player.stop();
     const rec = await stopRecorder();
+    setFixPlaying(null);
     if (st === 'singing') {
       const frames = framesRef.current;
       if (loop) {
         finishIteration(frames);
+        applyAdaptive(phraseIndex);
       } else if (phrase && frames.length && frames[frames.length - 1].t > phrase.start + (phrase.end - phrase.start) * 0.5) {
         scoreTake(frames, rec);
       }
       setStep('review');
     } else if (st === 'fullrun') {
       finishFullRun(rec);
+    } else if (st === 'game') {
+      finishGame();
     } else {
       setStep('idle');
       props.onReplayDone?.();
+      props.onCompareDone?.();
     }
     setStatus('');
   }
@@ -374,6 +559,8 @@ export default function PracticeSession(props: PracticeSessionProps) {
     hearStats.current = { start: 0, frames: 0, voiced: 0, maxDb: -100 };
     setFeedback(null);
     setFullResult(null);
+    setLastTake(null);
+    setFixPlaying(null);
     framesRef.current = [];
     lastTRef.current = -1;
     const { gains, guide } = gainsFor(backing === 'vocals' ? 'original' : backing, false);
@@ -402,6 +589,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
 
   function finishFullRun(rec: { blob: Blob; mime: string } | null) {
     const frames = framesRef.current.slice();
+    const atTempo = tempoRef.current;
     const per: { phraseIndex: number; score: PhraseScore }[] = [];
     let wsum = 0;
     let acc = 0;
@@ -409,7 +597,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
     for (const p of phrases) {
       if (p.start > lastT) break; // stopped early: only score what was sung
       if (p.end < takeStartRef.current) continue; // started later in the song
-      const sc = scorePhrase(analysis, p, frames, { semitones, level, allowOctave });
+      const sc = scorePhrase(analysis, p, frames, { semitones, level, allowOctave, highMidi: props.highMidi ?? undefined });
       per.push({ phraseIndex: p.index, score: sc });
       const w = p.end - p.start;
       wsum += w;
@@ -429,17 +617,120 @@ export default function PracticeSession(props: PracticeSessionProps) {
       noteResults: per.flatMap((p) => p.score.noteResults),
       tip: worst.score.tip,
     };
-    props.onActivity?.((lastT - takeStartRef.current) / tempo);
+    if (rec) {
+      setLastTake({
+        id: uid(),
+        kind: 'full',
+        label: 'sing-along',
+        blob: rec.blob,
+        mime: rec.mime,
+        frames,
+        noteResults: combined.noteResults,
+        startSongTime: takeStartRef.current,
+        tempo: atTempo,
+        semitones,
+        from: takeStartRef.current,
+        to: Math.min(analysis.duration, lastT + 0.6),
+      });
+    }
+    props.onActivity?.((lastT - takeStartRef.current) / atTempo);
     props.onAttempt({
       kind: 'full',
       phraseIndex: null,
       score: combined,
       frames,
-      tempo,
+      tempo: atTempo,
       semitones,
       startSongTime: takeStartRef.current,
       perPhrase: per,
       recording: rec,
+    });
+  }
+
+  // ---- game mode: full-song karaoke with points, combo and stars ----
+  async function playGame() {
+    player.stop();
+    hearStats.current = { start: 0, frames: 0, voiced: 0, maxDb: -100 };
+    setGameEnd(null);
+    setFeedback(null);
+    setLastTake(null);
+    setFixPlaying(null);
+    framesRef.current = [];
+    lastTRef.current = -1;
+    starPopsRef.current = [];
+    scorerRef.current = new KaraokeScorer(analysis, { semitones, level, tempo, allowOctave });
+    const { gains, guide } = gainsFor(backing === 'vocals' ? 'original' : backing, false);
+    const from = Math.max(0, (phrases[0]?.start ?? 0) - 2);
+    const to = analysis.duration;
+    takeStartRef.current = from;
+    setMode('game');
+    setStep('game');
+    setStatus('Game on! Every moment on pitch earns points. Stay on the bars to grow your combo and multiplier.');
+    await player.play({
+      from,
+      to,
+      loop: false,
+      tempo,
+      semitones,
+      gains,
+      guideNotes: guide ? guideNotes : [],
+      guideGain: 0.25,
+      onEnded: () => finishGame(),
+    });
+  }
+
+  function finishGame() {
+    const sc = scorerRef.current;
+    scorerRef.current = null;
+    setStep('review');
+    setStatus('');
+    if (!sc) return;
+    const outcome = sc.finish();
+    const frames = framesRef.current;
+    const lastT = frames.length ? frames[frames.length - 1].t : takeStartRef.current;
+    props.onActivity?.(Math.max(0, lastT - takeStartRef.current) / tempoRef.current);
+    const songId = props.songId;
+    (async () => {
+      let best: GameResult | null = null;
+      if (songId) {
+        try {
+          best = bestGame(await listGames(songId), songId);
+          await saveGame({ id: uid(), songId, date: Date.now(), ...outcome });
+        } catch {
+          /* storage unavailable: the result is still shown */
+        }
+      }
+      setGameEnd({ outcome, best, isNewBest: !best || outcome.points > best.points });
+    })();
+  }
+
+  const readGame = useCallback(() => scorerRef.current?.state ?? null, []);
+
+  // ---- "Hear it fixed" playback: your take, the fixed take or the original singer, all aligned ----
+  function playFix(what: FixPlayback, buffer: AudioBuffer | null) {
+    const take = lastTake;
+    if (!take) return;
+    player.stop();
+    framesRef.current = take.frames;
+    setStep('replaying');
+    setFixPlaying(what);
+    setStatus(what === 'you' ? 'Your take, as you sang it.' : what === 'fixed' ? 'Your take with every note pulled onto the target.' : 'The original singer.');
+    const gains: Partial<Record<TrackKind, number>> = what === 'original' ? (hasStems ? { vocals: 1, instrumental: 0.5 } : hasOriginal ? { original: 1 } : {}) : replayGains();
+    player.play({
+      from: take.from,
+      to: take.to,
+      loop: false,
+      tempo: take.tempo,
+      semitones: take.semitones,
+      gains,
+      guideNotes: what !== 'original' || hasStems || hasOriginal ? [] : guideNotes,
+      guideGain: 0.35,
+      recording: buffer ? { buffer, start: take.startSongTime, tempo: take.tempo, gain: 1 } : undefined,
+      onEnded: () => {
+        setStep('idle');
+        setFixPlaying(null);
+        setStatus('');
+      },
     });
   }
 
@@ -450,14 +741,14 @@ export default function PracticeSession(props: PracticeSessionProps) {
     player.stop();
     framesRef.current = r.frames;
     setStep('replaying');
-    setStatus('Replaying your take against the original.');
+    setStatus(r.label ?? 'Replaying your take against the original.');
     player.play({
       from: r.from,
       to: r.to,
       loop: false,
       tempo: r.tempo,
       semitones: r.semitones,
-      gains: hasStems ? { instrumental: 0.5, vocals: 0.35 } : hasOriginal ? { original: 0.5 } : {},
+      gains: replayGains(),
       recording: { buffer: r.buffer, start: r.start, tempo: r.tempo, gain: 1 },
       onEnded: () => {
         setStep('idle');
@@ -468,25 +759,68 @@ export default function PracticeSession(props: PracticeSessionProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.replayRequest]);
 
+  // ---- then vs now: first take, a short pause, latest take ----
+  useEffect(() => {
+    const c = props.compareRequest;
+    if (!c) return;
+    let cancelled = false;
+    let timer = 0;
+    const playOne = (r: ReplayTake, fallback: string, then: () => void) => {
+      framesRef.current = r.frames;
+      setStep('replaying');
+      setStatus(r.label ?? fallback);
+      player.play({
+        from: r.from,
+        to: r.to,
+        loop: false,
+        tempo: r.tempo,
+        semitones: r.semitones,
+        gains: replayGains(),
+        recording: { buffer: r.buffer, start: r.start, tempo: r.tempo, gain: 1 },
+        onEnded: then,
+      });
+    };
+    player.stop();
+    playOne(c.first, 'Then: your first take.', () => {
+      if (cancelled) return;
+      timer = window.setTimeout(() => {
+        if (cancelled) return;
+        playOne(c.latest, 'Now: your latest take.', () => {
+          if (cancelled) return;
+          setStep('idle');
+          setStatus('');
+          props.onCompareDone?.();
+        });
+      }, 500);
+    });
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.compareRequest]);
+
   // keyboard shortcuts
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA' || (e.target as HTMLElement)?.tagName === 'SELECT') return;
       if (e.code === 'Space') {
         e.preventDefault();
-        if (step === 'singing' || step === 'listening' || step === 'fullrun' || step === 'replaying') stop();
+        if (step === 'singing' || step === 'listening' || step === 'fullrun' || step === 'replaying' || step === 'game') stop();
         else if (mode === 'full') fullRun();
+        else if (mode === 'game') playGame();
         else sing();
-      } else if (e.key === 'l' || e.key === 'L') listen();
-      else if (e.key === 'ArrowRight') setPhraseIndex((i) => Math.min(phrases.length - 1, i + 1));
+      } else if (e.key === 'l' || e.key === 'L') {
+        if (mode === 'phrase') listen();
+      } else if (e.key === 'ArrowRight') setPhraseIndex((i) => Math.min(phrases.length - 1, i + 1));
       else if (e.key === 'ArrowLeft') setPhraseIndex((i) => Math.max(0, i - 1));
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, phrase, backing, tempo, loop, semitones, mode, startAt]);
+  }, [step, phrase, backing, tempo, loop, semitones, mode, startAt, lastTake]);
 
-  const busy = step === 'singing' || step === 'listening' || step === 'fullrun' || step === 'replaying';
+  const busy = step === 'singing' || step === 'listening' || step === 'fullrun' || step === 'replaying' || step === 'game';
   const getTime = useCallback(() => player.position(), []);
   const currentTargetMidi = (() => {
     const t = player.position();
@@ -497,6 +831,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
   const hardTags = phrase?.tags ?? [];
   const suggested = phrase ? exerciseForTags(hardTags) : null;
   const keyLabel = analysis.key ? keyName(transposeKey(analysis.key.tonic, semitones), analysis.key.mode) : null;
+  const gameAvailable = !exercise && !!props.songId;
 
   const backingOptions: { id: Backing; label: string }[] = exercise
     ? [{ id: 'guide', label: 'Guide tone' }]
@@ -516,10 +851,32 @@ export default function PracticeSession(props: PracticeSessionProps) {
           ]
         : [{ id: 'guide', label: 'Guide tone' }];
 
+  const defaultStatus =
+    mode === 'phrase'
+      ? phone
+        ? 'Listen first, then sing.'
+        : 'Listen first, then sing. Space = sing/stop, L = listen.'
+      : mode === 'game'
+        ? 'The whole song plays. Every moment on pitch earns points; keep your dot on the bars to grow the combo.'
+        : 'The song plays and the bars scroll. Sing along and steer your dot onto the bars.';
+
+  const hearItFixed = lastTake && (
+    <HearItFixed
+      take={lastTake}
+      analysis={analysis}
+      songTitle={props.title}
+      hasSinger={hasStems || hasOriginal}
+      playing={fixPlaying}
+      busy={busy && fixPlaying === null}
+      onPlay={playFix}
+      onStop={stop}
+    />
+  );
+
   return (
-    <div className="col" style={{ gap: 14 }}>
-      <div className="row between">
-        <div>
+    <div className={`ps col ${phone ? 'ps-phone' : ''}`} style={{ gap: 14 }}>
+      <div className="row between ps-head">
+        <div className="ps-title">
           <h1 style={{ marginBottom: 2 }}>{props.title}</h1>
           <div className="muted small row" style={{ gap: 8 }}>
             {props.subtitle && <span>{props.subtitle}</span>}
@@ -534,17 +891,27 @@ export default function PracticeSession(props: PracticeSessionProps) {
               </span>
             )}
             {analysis.mode === 'separated' && !exercise && <span className="pill good">Isolated vocal</span>}
+            {words && !exercise && (
+              <span className="pill accent" title="Each word is shown at the moment it is sung">
+                Word timing
+              </span>
+            )}
           </div>
         </div>
-        <div className="row">
+        <div className="row ps-modes">
           {!exercise && (
-            <div className="seg" title="Practise phrase by phrase, or sing the whole song">
+            <div className="seg" title="Practise phrase by phrase, sing the whole song, or play for points">
               <button className={mode === 'full' ? 'active' : ''} onClick={() => setMode('full')} disabled={busy}>
                 Sing along
               </button>
               <button className={mode === 'phrase' ? 'active' : ''} onClick={() => setMode('phrase')} disabled={busy}>
                 Learn phrase by phrase
               </button>
+              {gameAvailable && (
+                <button className={`game-tab ${mode === 'game' ? 'active' : ''}`} onClick={() => setMode('game')} disabled={busy}>
+                  Game
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -564,7 +931,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
             {micWarn === 'silent'
               ? "We can't hear you. The microphone signal is almost silent: it may be muted, too quiet, or the wrong microphone may be selected. "
               : "We hear sound but no clear singing voice. Sing a little louder and closer to the microphone, and keep the music in your headphones only. "}
-            Check the level bar under the note display on the right: it should move when you sing. If it doesn't, run the microphone check in Settings and pick your microphone there.
+            Check the level bar under the note display: it should move when you sing. If it doesn't, run the microphone check in Settings and pick your microphone there.
           </div>
           <button onClick={() => setMicWarn(null)}>OK</button>
         </div>
@@ -578,8 +945,8 @@ export default function PracticeSession(props: PracticeSessionProps) {
       )}
 
       {/* settings row */}
-      <div className="row between card flat" style={{ padding: '10px 14px' }}>
-        <div className="row" style={{ gap: 18 }}>
+      <div className="row between card flat ps-settings" style={{ padding: '10px 14px' }}>
+        <div className="row ps-settings-row" style={{ gap: 18 }}>
           {props.onSemitones && (
             <label className="row small" style={{ gap: 8 }}>
               <span className="muted">Key</span>
@@ -587,7 +954,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
                 value={semitones}
                 disabled={busy}
                 onChange={(e) => props.onSemitones?.(parseInt(e.target.value, 10))}
-                style={{ width: 'auto', padding: '6px 10px' }}
+                className="ps-select"
               >
                 {Array.from({ length: 20 }, (_, i) => 7 - i).map((k) => {
                   const kn = analysis.key ? keyName(transposeKey(analysis.key.tonic, k), analysis.key.mode) : null;
@@ -608,7 +975,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
             <span className="muted">Speed</span>
             <div className="seg">
               {TEMPOS.map((t) => (
-                <button key={t} className={tempo === t ? 'active' : ''} disabled={busy} onClick={() => setTempo(t)}>
+                <button key={t} className={tempo === t ? 'active' : ''} disabled={busy} onClick={() => { setTempo(t); setAdaptiveNote(null); }}>
                   {Math.round(t * 100)}%
                 </button>
               ))}
@@ -618,7 +985,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
             <span className="muted">Hear</span>
             <div className="seg">
               {backingOptions.map((b) => (
-                <button key={b.id} className={backing === b.id ? 'active' : ''} disabled={busy} onClick={() => setBacking(b.id)}>
+                <button key={b.id} className={backing === b.id ? 'active' : ''} disabled={busy} onClick={() => { setBacking(b.id); setAdaptiveNote(null); }}>
                   {b.label}
                 </button>
               ))}
@@ -629,13 +996,27 @@ export default function PracticeSession(props: PracticeSessionProps) {
               <input type="checkbox" checked={loop} disabled={busy} onChange={(e) => setLoop(e.target.checked)} /> Loop the phrase
             </label>
           )}
+          {!exercise && (
+            <label className="toggle small" title="After each phrase, slow down or speed up and switch the guide tone on or off from your scores">
+              <input
+                type="checkbox"
+                checked={adaptiveOn}
+                disabled={busy}
+                onChange={(e) => {
+                  void updateProfile({ adaptiveDifficulty: e.target.checked });
+                  if (!e.target.checked) setAdaptiveNote(null);
+                }}
+              />{' '}
+              Auto-adjust difficulty
+            </label>
+          )}
         </div>
         {preparing && <span className="pill accent">Preparing audio…</span>}
       </div>
 
       <div className="practice-layout">
-        <div className="col" style={{ gap: 12 }}>
-          <div className="roll-wrap">
+        <div className="col ps-main" style={{ gap: 12 }}>
+          <div className={`roll-wrap ${mode === 'game' ? 'game' : ''}`}>
             <PianoRoll
               analysis={analysis}
               semitones={semitones}
@@ -646,13 +1027,16 @@ export default function PracticeSession(props: PracticeSessionProps) {
               phrase={mode === 'phrase' && phrase ? { start: phrase.start, end: phrase.end } : null}
               results={feedback?.results ?? null}
               allowOctave={allowOctave}
-              follow={busy || mode === 'full'}
-              windowSeconds={mode === 'full' ? 8 : 6}
-              height={430}
+              follow={busy || mode !== 'phrase'}
+              windowSeconds={mode === 'phrase' ? 6 : 8}
+              height={rollHeight}
+              words={words}
+              starPops={starPopsRef}
             />
+            {step === 'game' && <GameHud read={readGame} phraseCount={phrases.length} />}
           </div>
 
-          <div className="legend" style={{ padding: '0 4px' }}>
+          <div className="legend ps-legend" style={{ padding: '0 4px' }}>
             <span>
               <i style={{ background: '#818cf8' }} />
               the correct notes
@@ -676,11 +1060,11 @@ export default function PracticeSession(props: PracticeSessionProps) {
           </div>
 
           {/* transport */}
-          <div className="row between card flat" style={{ padding: '12px 14px' }}>
-            <div className="row">
+          <div className="row between card flat ps-transport" style={{ padding: '12px 14px' }}>
+            <div className="row ps-transport-buttons">
               {mode === 'phrase' ? (
                 <>
-                  <button disabled={busy || phraseIndex === 0} onClick={() => setPhraseIndex((i) => i - 1)} title="Previous phrase (←)">
+                  <button disabled={busy || phraseIndex === 0} onClick={() => setPhraseIndex((i) => i - 1)} title="Previous phrase (←)" aria-label="Previous phrase">
                     ◀
                   </button>
                   <button className="big" disabled={busy || !phrase} onClick={listen} title="Hear the target notes (L)">
@@ -695,13 +1079,17 @@ export default function PracticeSession(props: PracticeSessionProps) {
                       ● Sing
                     </button>
                   )}
-                  <button disabled={busy || phraseIndex >= phrases.length - 1} onClick={() => setPhraseIndex((i) => i + 1)} title="Next phrase (→)">
+                  <button disabled={busy || phraseIndex >= phrases.length - 1} onClick={() => setPhraseIndex((i) => i + 1)} title="Next phrase (→)" aria-label="Next phrase">
                     ▶
                   </button>
                 </>
               ) : busy ? (
                 <button className="big danger" onClick={stop}>
                   ■ Stop
+                </button>
+              ) : mode === 'game' ? (
+                <button className="big primary game-start" onClick={playGame}>
+                  ▶ Start the game
                 </button>
               ) : (
                 <>
@@ -710,7 +1098,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
                   </button>
                   <label className="row small" style={{ gap: 6 }}>
                     <span className="muted">from</span>
-                    <select value={startAt} onChange={(e) => setStartAt(parseInt(e.target.value, 10))} style={{ width: 'auto', padding: '6px 10px' }}>
+                    <select value={startAt} onChange={(e) => setStartAt(parseInt(e.target.value, 10))} className="ps-select">
                       <option value={0}>the beginning</option>
                       {phrases.slice(1).map((p) => (
                         <option key={p.index} value={p.index}>
@@ -722,11 +1110,19 @@ export default function PracticeSession(props: PracticeSessionProps) {
                 </>
               )}
             </div>
-            <div className="muted small">
-              {status || (mode === 'phrase' ? 'Listen first, then sing. Space = sing/stop, L = listen.' : 'The song plays and the bars scroll. Sing along and steer your dot onto the bars.')}
+            <div className="muted small ps-status">
+              {status || defaultStatus}
               {loop && step === 'singing' && ` Pass ${iteration + 1}.`}
             </div>
           </div>
+          {adaptiveOn && adaptiveNote && mode === 'phrase' && (
+            <div className="adaptive-note small" role="status">
+              <span className="adaptive-icon" aria-hidden>
+                ⟳
+              </span>
+              {adaptiveNote}
+            </div>
+          )}
 
           {/* phrase strip */}
           {mode === 'phrase' && (
@@ -749,34 +1145,51 @@ export default function PracticeSession(props: PracticeSessionProps) {
                 <h2>Sing-along results</h2>
                 <ScoreRing value={fullResult.overall} label="overall" />
               </div>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Phrase</th>
-                    <th>Words</th>
-                    <th>Score</th>
-                    <th>Pitch</th>
-                    <th>Timing</th>
-                    <th>Length</th>
-                    <th>Biggest issue</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {fullResult.perPhrase.map((p) => (
-                    <tr key={p.phraseIndex}>
-                      <td>{p.phraseIndex + 1}</td>
-                      <td className="muted small">{phrases[p.phraseIndex].text.slice(0, 40)}</td>
-                      <td>
-                        <b>{p.score.scores.overall}</b>
-                      </td>
-                      <td>{p.score.scores.pitch}</td>
-                      <td>{p.score.scores.timing}</td>
-                      <td>{p.score.scores.length}</td>
-                      <td className="small">{p.score.issues[0]?.text ?? '—'}</td>
+              <div className="table-scroll">
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>Phrase</th>
+                      <th>Words</th>
+                      <th>Score</th>
+                      <th>Pitch</th>
+                      <th>Timing</th>
+                      <th>Length</th>
+                      <th>Technique</th>
+                      <th>Biggest issue</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {fullResult.perPhrase.map((p) => {
+                      const wt = worstTechnique(p.score.technique);
+                      return (
+                        <tr key={p.phraseIndex}>
+                          <td>{p.phraseIndex + 1}</td>
+                          <td className="muted small">{phrases[p.phraseIndex].text.slice(0, 40)}</td>
+                          <td>
+                            <b>{p.score.scores.overall}</b>
+                          </td>
+                          <td>{p.score.scores.pitch}</td>
+                          <td>{p.score.scores.timing}</td>
+                          <td>{p.score.scores.length}</td>
+                          <td className="small">
+                            {wt ? (
+                              <span className="pill bad" title={`${wt.count} ${wt.count === 1 ? 'note' : 'notes'} ${wt.label}`}>
+                                {wt.label}
+                              </span>
+                            ) : p.score.technique && p.score.technique.notesChecked > 0 ? (
+                              <span className="pill good">clean</span>
+                            ) : (
+                              <span className="muted">—</span>
+                            )}
+                          </td>
+                          <td className="small">{p.score.issues[0]?.text ?? '—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
               <div className="row">
                 <button
                   onClick={() => {
@@ -790,14 +1203,54 @@ export default function PracticeSession(props: PracticeSessionProps) {
                   Practise the weakest phrase
                 </button>
               </div>
+              {lastTake?.kind === 'full' && hearItFixed}
+            </div>
+          )}
+
+          {/* game end */}
+          {mode === 'game' && gameEnd && (
+            <GameEndScreen
+              outcome={gameEnd.outcome}
+              best={gameEnd.best}
+              isNewBest={gameEnd.isNewBest}
+              phraseTexts={phrases.map((p) => p.text)}
+              onAgain={playGame}
+              onPractise={(pi) => {
+                setMode('phrase');
+                setPhraseIndex(pi);
+              }}
+            />
+          )}
+          {mode === 'game' && !gameEnd && step !== 'game' && (
+            <div className="card flat game-intro">
+              <b>Game mode</b>
+              <div className="small muted">
+                The whole song plays and your voice earns points for every moment on pitch. Hit notes in a row to build a combo and a multiplier up to ×4;
+                each phrase gets up to five stars. Go off pitch for more than a third of a second and the combo breaks. It is for fun: the honest coaching
+                lives in the other two modes.
+              </div>
+              <div className="row tiny muted" style={{ gap: 10, marginTop: 6 }}>
+                <span>
+                  <Stars n={5} size={0.9} /> 95%+ on pitch
+                </span>
+                <span>
+                  <Stars n={3} size={0.9} /> 70%+
+                </span>
+                <span>
+                  <Stars n={1} size={0.9} /> 35%+
+                </span>
+              </div>
             </div>
           )}
         </div>
 
         {/* right column */}
-        <div className="col" style={{ gap: 12 }}>
-          <div className="card">
+        <div className="col ps-side" style={{ gap: 12 }}>
+          <div className="card ps-meter">
             <PitchMeter frame={frame} targetMidi={busy ? currentTargetMidi : null} tolerance={level === 'advanced' ? 20 : level === 'intermediate' ? 35 : 50} />
+            <div className="vq-wrap">
+              <VoiceQualityMeter frame={frame} compact={phone} />
+            </div>
           </div>
           {exercise && (
             <div className="card flat" style={{ background: 'var(--accent-soft)', borderColor: '#c7cdfd' }}>
@@ -841,17 +1294,24 @@ export default function PracticeSession(props: PracticeSessionProps) {
               )}
             </div>
           )}
-          {feedback && (
+          {feedback && mode === 'phrase' && (
             <div className="card">
               <FeedbackPanel
                 scores={feedback.scores}
                 issues={feedback.issues}
                 tip={feedback.tip}
                 title={feedback.title}
+                technique={feedback.technique}
                 onRetry={busy ? undefined : sing}
                 onNext={!busy && phraseIndex < phrases.length - 1 ? () => setPhraseIndex((i) => i + 1) : undefined}
                 compact
               />
+              {lastTake?.kind === 'phrase' && (
+                <>
+                  <hr />
+                  {hearItFixed}
+                </>
+              )}
             </div>
           )}
         </div>

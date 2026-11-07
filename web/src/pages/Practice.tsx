@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useApp } from '../lib/AppContext';
-import { getAsset, getSong, listRecordings, saveAttempt, saveRecording, saveSong } from '../lib/store/db';
-import type { PitchFrame, RecordingRecord, SongRecord } from '../lib/types';
+import { getAsset, getSong, listAttempts, listRecordings, listReviews, reviewId, saveAttempt, saveRecording, saveReview, saveSong } from '../lib/store/db';
+import type { PhraseAttempt, RecordingRecord, ReviewState, SongRecord } from '../lib/types';
 import { decodeBlob } from '../lib/audio/decode';
 import { player } from '../lib/audio/Player';
-import PracticeSession, { type AttemptOut } from '../components/PracticeSession';
+import PracticeSession, { type AttemptOut, type PracticeMode, type ReplayTake } from '../components/PracticeSession';
 import { checkSongJob, type UpgradeInfo } from '../lib/songJobs';
 import { startAnalysis } from '../lib/api';
 import { uid, fmtTime } from '../lib/music/notes';
 import { recommendSemitones } from '../lib/songs';
+import { firstAndLatest, updateReview } from '../lib/review';
 
 export default function Practice() {
   const { songId } = useParams();
@@ -22,11 +23,17 @@ export default function Practice() {
   const [hasOriginal, setHasOriginal] = useState(false);
   const [upgrade, setUpgrade] = useState<UpgradeInfo | null>(null);
   const [recordings, setRecordings] = useState<RecordingRecord[]>([]);
-  const [replay, setReplay] = useState<{ buffer: AudioBuffer; start: number; tempo: number; semitones: number; frames: PitchFrame[]; from: number; to: number } | null>(null);
+  const [priorAttempts, setPriorAttempts] = useState<PhraseAttempt[]>([]);
+  const [replay, setReplay] = useState<ReplayTake | null>(null);
+  const [compare, setCompare] = useState<{ first: ReplayTake; latest: ReplayTake } | null>(null);
+  const [comparing, setComparing] = useState<string | null>(null); // decoding message
   const [showTakes, setShowTakes] = useState(false);
   const [isolating, setIsolating] = useState(false);
+  const [phraseIndex, setPhraseIndex] = useState(0);
+  const [mode, setMode] = useState<PracticeMode>('full');
   const songRef = useRef<SongRecord | null>(null);
   songRef.current = song;
+  const reviewsRef = useRef<Map<string, ReviewState>>(new Map());
 
   const loadTracks = useCallback(async (s: SongRecord) => {
     player.clear();
@@ -60,7 +67,11 @@ export default function Practice() {
       if (cancelled) return;
       setSong(s);
       setLoading('');
-      setRecordings(await listRecordings(s.id));
+      const [recs, attempts, reviews] = await Promise.all([listRecordings(s.id), listAttempts(s.id), listReviews(s.id)]);
+      if (cancelled) return;
+      setRecordings(recs);
+      setPriorAttempts(attempts.sort((a, b) => a.date - b.date));
+      reviewsRef.current = new Map(reviews.map((r) => [reviewId(r.songId, r.phraseIndex), r]));
     })();
     return () => {
       cancelled = true;
@@ -100,15 +111,28 @@ export default function Practice() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [song?.jobId, song?.id]);
 
+  /** Spaced review: every scored phrase moves its review state along (and the Home page picks up what is due). */
+  const touchReview = useCallback(async (sid: string, phrase: number, score: number) => {
+    const key = reviewId(sid, phrase);
+    const prev = reviewsRef.current.get(key) ?? null;
+    const next = updateReview(prev, score, Date.now(), { songId: sid, phraseIndex: phrase });
+    reviewsRef.current.set(key, next);
+    try {
+      await saveReview(next);
+    } catch {
+      /* storage unavailable: the practice still works */
+    }
+  }, []);
+
   const onAttempt = useCallback(
     async (a: AttemptOut) => {
       const s = songRef.current;
       if (!s) return;
       const ids: string[] = [];
+      const saved: PhraseAttempt[] = [];
       if (a.kind === 'phrase' && a.phraseIndex !== null) {
-        const id = uid();
-        await saveAttempt({
-          id,
+        const rec: PhraseAttempt = {
+          id: uid(),
           songId: s.id,
           phraseIndex: a.phraseIndex,
           date: Date.now(),
@@ -119,13 +143,15 @@ export default function Practice() {
           tip: a.score.tip,
           frames: a.frames,
           noteResults: a.score.noteResults,
-        });
-        ids.push(id);
+        };
+        await saveAttempt(rec);
+        ids.push(rec.id);
+        saved.push(rec);
+        await touchReview(s.id, a.phraseIndex, a.score.scores.overall);
       } else if (a.perPhrase) {
         for (const p of a.perPhrase) {
-          const id = uid();
-          await saveAttempt({
-            id,
+          const rec: PhraseAttempt = {
+            id: uid(),
             songId: s.id,
             phraseIndex: p.phraseIndex,
             date: Date.now(),
@@ -136,11 +162,15 @@ export default function Practice() {
             tip: p.score.tip,
             frames: [],
             noteResults: p.score.noteResults,
-          });
-          ids.push(id);
+          };
+          await saveAttempt(rec);
+          ids.push(rec.id);
+          saved.push(rec);
+          await touchReview(s.id, p.phraseIndex, p.score.scores.overall);
         }
       }
       ids.forEach((id) => registerAttempt(id, s.id));
+      if (saved.length) setPriorAttempts((prev) => [...prev, ...saved]);
       if (a.recording) {
         const rec: RecordingRecord = {
           id: uid(),
@@ -163,17 +193,38 @@ export default function Practice() {
       await saveSong(updated);
       songRef.current = updated;
     },
-    [registerAttempt],
+    [registerAttempt, touchReview],
   );
+
+  async function toReplayTake(r: RecordingRecord, label?: string): Promise<ReplayTake> {
+    const buffer = await decodeBlob(r.blob);
+    const s = songRef.current!;
+    const to = r.kind === 'full' ? s.analysis.duration : (s.analysis.phrases[r.phraseIndex ?? 0]?.end ?? s.analysis.duration) + 0.4;
+    return { buffer, start: r.startSongTime, tempo: r.tempo, semitones: r.semitones, frames: r.frames, from: r.startSongTime, to, label };
+  }
 
   async function replayTake(r: RecordingRecord) {
     try {
-      const buffer = await decodeBlob(r.blob);
-      const s = songRef.current!;
-      const to = r.kind === 'full' ? s.analysis.duration : (s.analysis.phrases[r.phraseIndex ?? 0]?.end ?? s.analysis.duration) + 0.4;
-      setReplay({ buffer, start: r.startSongTime, tempo: r.tempo, semitones: r.semitones, frames: r.frames, from: r.startSongTime, to });
+      setReplay(await toReplayTake(r));
     } catch {
       alert('Could not decode that recording in this browser.');
+    }
+  }
+
+  /** Then vs now: the first and the latest take of the current phrase (or of full runs), back to back. */
+  async function compareFirstAndLatest(target: number | null) {
+    const pair = firstAndLatest(recordings, target);
+    if (!pair || pair.count < 2) return;
+    setComparing('Decoding your two takes…');
+    try {
+      const when = (r: RecordingRecord) => new Date(r.date).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+      const first = await toReplayTake(pair.first, `Then: ${when(pair.first)}, scored ${pair.first.scores.overall}.`);
+      const latest = await toReplayTake(pair.latest, `Now: ${when(pair.latest)}, scored ${pair.latest.scores.overall}.`);
+      setCompare({ first, latest });
+    } catch {
+      alert('Could not decode those recordings in this browser.');
+    } finally {
+      setComparing(null);
     }
   }
 
@@ -201,6 +252,10 @@ export default function Practice() {
   const last = profile.rangeTests[profile.rangeTests.length - 1];
   const rec = recommendSemitones(song.analysis, profile);
   const initialPhrase = params.get('phrase') ? parseInt(params.get('phrase')!, 10) : 0;
+  const compareTarget: number | null = mode === 'phrase' ? phraseIndex : null;
+  const comparePair = firstAndLatest(recordings, compareTarget);
+  const canCompare = !!comparePair && comparePair.count >= 2 && !compare;
+  const compareLabel = compareTarget === null ? 'full runs' : `phrase ${compareTarget + 1}`;
 
   const banner =
     upgrade && !upgrade.done ? (
@@ -209,6 +264,7 @@ export default function Practice() {
           Separating the vocal from the band on the analysis server ({upgrade.status}
           {upgrade.progress ? `, ${Math.round(upgrade.progress * 100)}%` : ''}). You are practising in fallback mode meanwhile; the view
           upgrades automatically when the isolated vocal is ready.
+          {upgrade.message && /words/i.test(upgrade.message) ? ` ${upgrade.message}` : ''}
         </div>
       </div>
     ) : upgrade?.failed ? (
@@ -233,7 +289,7 @@ export default function Practice() {
     ) : null;
 
   return (
-    <div className="col" style={{ gap: 14 }}>
+    <div className="col practice-page" style={{ gap: 14 }}>
       <div className="row between">
         <Link to="/songs" className="small">
           ← All songs
@@ -247,39 +303,55 @@ export default function Practice() {
         </div>
       </div>
       {showTakes && (
-        <div className="card">
-          <h3>Your recordings</h3>
-          <p className="tiny muted">Stored only in this browser. Replay plays your voice over the song.</p>
-          <table className="table">
-            <thead>
-              <tr>
-                <th>When</th>
-                <th>What</th>
-                <th>Score</th>
-                <th>Key / speed</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {[...recordings].reverse().map((r) => (
-                <tr key={r.id}>
-                  <td className="small">{new Date(r.date).toLocaleString()}</td>
-                  <td>{r.kind === 'full' ? 'Full run' : `Phrase ${(r.phraseIndex ?? 0) + 1} (${fmtTime(r.startSongTime)})`}</td>
-                  <td>
-                    <b>{r.scores.overall}</b>
-                  </td>
-                  <td className="small">
-                    {r.semitones === 0 ? 'original' : `${r.semitones > 0 ? '+' : ''}${r.semitones}`} · {Math.round(r.tempo * 100)}%
-                  </td>
-                  <td>
-                    <button className="small" onClick={() => replayTake(r)}>
-                      Replay
-                    </button>
-                  </td>
+        <div className="card takes-panel">
+          <div className="row between" style={{ alignItems: 'flex-start' }}>
+            <div>
+              <h3>Your recordings</h3>
+              <p className="tiny muted">Stored only in this browser. Replay plays your voice over the song.</p>
+            </div>
+            <div className="col" style={{ gap: 4, alignItems: 'flex-end' }}>
+              <button className="small compare-btn" disabled={!canCompare || !!comparing} onClick={() => compareFirstAndLatest(compareTarget)} title="Then vs now: your first take, then your latest, each with its trail on the roll">
+                {comparing ? comparing : `Compare first and latest (${compareLabel})`}
+              </button>
+              {!canCompare && !compare && (
+                <span className="tiny muted">
+                  {comparePair && comparePair.count >= 2 ? '' : `Record two takes of ${compareLabel} to compare then and now.`}
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>What</th>
+                  <th>Score</th>
+                  <th>Key / speed</th>
+                  <th></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {[...recordings].reverse().map((r) => (
+                  <tr key={r.id}>
+                    <td className="small">{new Date(r.date).toLocaleString()}</td>
+                    <td>{r.kind === 'full' ? 'Full run' : `Phrase ${(r.phraseIndex ?? 0) + 1} (${fmtTime(r.startSongTime)})`}</td>
+                    <td>
+                      <b>{r.scores.overall}</b>
+                    </td>
+                    <td className="small">
+                      {r.semitones === 0 ? 'original' : `${r.semitones > 0 ? '+' : ''}${r.semitones}`} · {Math.round(r.tempo * 100)}%
+                    </td>
+                    <td>
+                      <button className="small" onClick={() => replayTake(r)} disabled={!!compare}>
+                        Replay
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
       <PracticeSession
@@ -307,6 +379,13 @@ export default function Practice() {
         banner={banner}
         replayRequest={replay}
         onReplayDone={() => setReplay(null)}
+        compareRequest={compare}
+        onCompareDone={() => setCompare(null)}
+        songId={song.id}
+        words={song.words ?? null}
+        priorAttempts={priorAttempts}
+        onPhraseChange={setPhraseIndex}
+        onModeChange={setMode}
       />
     </div>
   );
