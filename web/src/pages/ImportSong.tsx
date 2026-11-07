@@ -32,6 +32,7 @@ export default function ImportSong() {
   const [lyricsSource, setLyricsSource] = useState<Lyrics['source']>('none');
   const [lyricsMsg, setLyricsMsg] = useState('');
   const [useServer, setUseServer] = useState(true);
+  const [findWords, setFindWords] = useState(false);
   const [progress, setProgress] = useState(0);
   const [msg, setMsg] = useState('');
   const [over, setOver] = useState(false);
@@ -40,6 +41,7 @@ export default function ImportSong() {
 
   useEffect(() => {
     setUseServer(!!server?.ok);
+    setFindWords(!!server?.ok && !!server.whisper);
   }, [server]);
 
   async function pick(f: File) {
@@ -101,7 +103,7 @@ export default function ImportSong() {
     if (useServer && server?.ok) {
       try {
         setMsg('Uploading to the analysis server…');
-        jobId = await startAnalysis(file, file.name, server.separation === 'demucs');
+        jobId = await startAnalysis(file, file.name, server.separation === 'demucs', { words: findWords && !!server.whisper });
         // wait for the quick (mix-based) analysis
         for (;;) {
           const st = await jobStatus(jobId);
@@ -263,6 +265,21 @@ export default function ImportSong() {
               <div className="banner warn small">
                 The analysis server is not running, so the song will be analysed in your browser from the full mix (fallback mode): synced lyrics, the
                 extracted melody line and a guide tone over the original track. Start the server (see README) for the isolated vocal.
+              </div>
+            )}
+            {server?.ok && (
+              <div className="col" style={{ gap: 4 }}>
+                <label className="toggle">
+                  <input type="checkbox" checked={findWords} onChange={(e) => setFindWords(e.target.checked)} disabled={!useServer || !server.whisper} />
+                  Find the words with speech recognition
+                </label>
+                <span className="tiny muted">
+                  {server.whisper === undefined
+                    ? 'This analysis server does not report speech recognition; update it to time each word.'
+                    : server.whisper
+                      ? 'Each sung word gets its own timing, so the lyrics light up word by word (this runs after the analysis and takes a minute or two).'
+                      : 'Speech recognition is not installed on the analysis server (see server/README: pip install -r requirements-words.txt).'}
+                </span>
               </div>
             )}
             <div>

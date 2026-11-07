@@ -58,6 +58,15 @@ export default function Library() {
                     <span className="pill">difficulty {songDifficulty(s.analysis)}/5</span>
                     {s.mode === 'separated' ? <span className="pill good">isolated vocal</span> : <span className="pill near">fallback</span>}
                     {s.jobId && <span className="pill accent">separating…</span>}
+                    {s.words && s.words.length > 0 ? (
+                      <span className="pill good" title={`${s.words.length} words timed by speech recognition`}>
+                        words aligned
+                      </span>
+                    ) : s.lyrics.synced ? (
+                      <span className="pill" title="Lyrics timed line by line from the LRC file">
+                        synced lyrics
+                      </span>
+                    ) : null}
                   </div>
                   <div className="small muted" style={{ marginTop: 8 }}>
                     {b.learned} of {s.analysis.phrases.length} phrases at 80+
