@@ -523,6 +523,11 @@ label.field {
   border-radius: 6px;
   background: var(--panel-2);
 }
+.table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
 .table {
   width: 100%;
   border-collapse: collapse;

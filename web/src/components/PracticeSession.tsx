@@ -104,6 +104,14 @@ export default function PracticeSession(props: PracticeSessionProps) {
   const [startAt, setStartAt] = useState(0); // phrase index where sing-along starts
   const defaultBacking: Backing = exercise ? 'guide' : hasStems ? 'instrumental+guide' : hasOriginal ? 'original+guide' : 'guide';
   const [backing, setBacking] = useState<Backing>(defaultBacking);
+  // when the isolated vocal arrives mid-session, move from the full song to the band without a remount
+  const prevStems = useRef(hasStems);
+  useEffect(() => {
+    if (hasStems && !prevStems.current) {
+      setBacking((b) => (b === 'original+guide' ? 'instrumental+guide' : b));
+    }
+    prevStems.current = hasStems;
+  }, [hasStems]);
   const [step, setStep] = useState<Step>('idle');
   const [preparing, setPreparing] = useState(false);
   const [status, setStatus] = useState<string>('');
@@ -212,7 +220,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
     setFixPlaying(null);
     framesRef.current = [];
     setIteration(0);
-  }, [phraseIndex, semitones]);
+  }, [phraseIndex, semitones, analysis]);
 
   function withGuide(b: Backing, on: boolean): Backing {
     if (on) {
@@ -1146,7 +1154,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
                 <ScoreRing value={fullResult.overall} label="overall" />
               </div>
               <div className="table-scroll">
-                <table className="table">
+                <div className="table-wrap"><table className="table">
                   <thead>
                     <tr>
                       <th>Phrase</th>
@@ -1188,7 +1196,7 @@ export default function PracticeSession(props: PracticeSessionProps) {
                       );
                     })}
                   </tbody>
-                </table>
+                </table></div>
               </div>
               <div className="row">
                 <button

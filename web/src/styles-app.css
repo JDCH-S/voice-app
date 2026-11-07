@@ -56,7 +56,10 @@
   .main .grid.cols-2,
   .main .grid.cols-3,
   .main .grid.cols-4 {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .main .grid > * {
+    min-width: 0;
   }
   .main h1 {
     font-size: 1.55rem;

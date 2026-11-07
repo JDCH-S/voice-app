@@ -166,7 +166,7 @@ export default function Progress() {
             <div className="muted small">No games played yet. Open a song and pick Game mode.</div>
           ) : (
             <div className="table-wrap">
-              <table className="table">
+              <div className="table-wrap"><table className="table">
                 <thead>
                   <tr>
                     <th>Song</th>
@@ -194,7 +194,7 @@ export default function Progress() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
             </div>
           )}
         </div>
@@ -238,7 +238,7 @@ export default function Progress() {
       <div className="card">
         <h3>Sessions</h3>
         <div className="table-wrap">
-          <table className="table">
+          <div className="table-wrap"><table className="table">
             <thead>
               <tr>
                 <th>Date</th>
@@ -264,7 +264,7 @@ export default function Progress() {
                   </tr>
                 ))}
             </tbody>
-          </table>
+          </table></div>
         </div>
       </div>
     </div>

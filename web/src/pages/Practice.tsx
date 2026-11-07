@@ -321,7 +321,7 @@ export default function Practice() {
             </div>
           </div>
           <div className="table-scroll">
-            <table className="table">
+            <div className="table-wrap"><table className="table">
               <thead>
                 <tr>
                   <th>When</th>
@@ -350,12 +350,12 @@ export default function Practice() {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           </div>
         </div>
       )}
       <PracticeSession
-        key={`${song.id}:${song.mode}:${hasStems}`}
+        key={song.id}
         analysis={song.analysis}
         title={song.title}
         subtitle={song.artist}
