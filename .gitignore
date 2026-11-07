@@ -6,3 +6,4 @@ __pycache__/
 .jobs/
 server/tests/out/
 .DS_Store
+web/tsconfig.tsbuildinfo
