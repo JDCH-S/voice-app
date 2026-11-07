@@ -1,0 +1,41 @@
+# Voice Coach: docker compose up -d --build   then open http://localhost:8765
+# For a public server put Caddy (TLS) in front: see docs/DEPLOY.md. Microphone access in
+# browsers needs HTTPS, so the plain port is only for localhost.
+services:
+  voicecoach:
+    build: .
+    image: voicecoach:latest
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      # Browser origins allowed to call the API. "*" is fine when this container also serves
+      # the web app (same origin). Set it to your site when the app is hosted elsewhere.
+      VOICECOACH_ORIGINS: "*"
+      # AI coach: either set the key here or save it from the app's Settings page (stored in
+      # the secrets volume). Leave empty to add it from the app.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      VOICECOACH_COACH_MODEL: "${VOICECOACH_COACH_MODEL:-claude-sonnet-5-5}"
+      # Speech recognition model for word timing: tiny | base | small | medium (CPU, int8).
+      VOICECOACH_WHISPER_MODEL: "${VOICECOACH_WHISPER_MODEL:-small}"
+      DEMUCS_THREADS: "${DEMUCS_THREADS:-4}"
+      VOICE_MAX_UPLOAD_MB: "200"
+    volumes:
+      - jobs:/data/jobs          # uploads and stems while a job is alive (purged after 2 h)
+      - secrets:/data/secrets    # the saved Anthropic key (mode 600)
+      - models:/data/models      # Demucs and whisper weights, downloaded once
+    deploy:
+      resources:
+        limits:
+          memory: 8g             # separation of a 4-minute song peaks around 4-6 GB on CPU
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  jobs:
+  secrets:
+  models:

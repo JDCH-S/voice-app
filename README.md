@@ -55,6 +55,8 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 The web app looks for the service at `http://localhost:8765` (change it under Settings). See `server/README.md` for the endpoints and `docs/ANALYSIS_SCHEMA.md` for the analysis contract shared by the service and the in-browser analyser.
 
+Two optional additions to the service: **word timing** (`pip install -r requirements-words.txt`; faster-whisper recognises the words in the isolated vocal so lyrics can be shown word by word) and the **AI coach** (`/coach`, `/coach/plan`; needs an Anthropic API key, set `ANTHROPIC_API_KEY` or save it from Settings). Both are detected by `/health` and the app works without them. To run Voice Coach on a server or with Docker, see `docs/DEPLOY.md`.
+
 ## How it works
 
 | Part | Where | Notes |

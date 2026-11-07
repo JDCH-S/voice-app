@@ -7,3 +7,4 @@ __pycache__/
 server/tests/out/
 .DS_Store
 web/tsconfig.tsbuildinfo
+server/.secrets/

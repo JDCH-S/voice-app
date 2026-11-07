@@ -1,0 +1,15 @@
+.git
+.claude
+**/node_modules
+**/dist
+**/.venv
+**/__pycache__
+**/*.pyc
+server/.jobs
+server/.secrets
+server/tests/out
+web/tsconfig.tsbuildinfo
+docs
+*.md
+!server/README.md
+.DS_Store
