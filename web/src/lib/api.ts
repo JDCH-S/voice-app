@@ -1,4 +1,4 @@
-import type { SongAnalysis } from './types';
+import type { SongAnalysis, WordTiming, WeeklyPlan } from './types';
 
 /**
  * In development (`npm run dev`) the analysis service runs separately on port 8765.
@@ -115,4 +115,101 @@ export async function searchLyrics(
   });
   if (!r.ok) throw new Error('Lyrics lookup failed');
   return (await r.json()) as { found: boolean; synced: string | null; plain: string | null };
+}
+
+// ---------- word timing (speech recognition on the server) ----------
+
+
+/** Word-level timing recognised from the (isolated) vocal. 404 until ready, 503 when the server has no speech model. */
+export async function jobWords(jobId: string): Promise<WordTiming[] | null> {
+  const r = await fetch(`${serverUrl}/jobs/${jobId}/words`);
+  if (r.status === 404 || r.status === 503) return null;
+  if (!r.ok) throw new Error(`Words not available (${r.status})`);
+  const j = (await r.json()) as { words: WordTiming[] };
+  return j.words;
+}
+
+/** Align the user's own lyric text to the recognised word timing of a job. */
+export async function alignLyricsOnServer(jobId: string, lyrics: string): Promise<WordTiming[]> {
+  const r = await fetch(`${serverUrl}/jobs/${jobId}/align`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ lyrics }),
+  });
+  if (!r.ok) throw new Error(`Alignment failed (${r.status})`);
+  const j = (await r.json()) as { words: WordTiming[] };
+  return j.words;
+}
+
+// ---------- AI coach ----------
+
+export interface CoachStatus {
+  available: boolean;
+  model: string;
+  keySource: 'env' | 'file' | 'none';
+  message?: string;
+}
+
+export async function coachStatus(): Promise<CoachStatus | null> {
+  try {
+    const r = await withTimeout(fetch(`${serverUrl}/coach/status`), 4000);
+    if (!r.ok) return null;
+    return (await r.json()) as CoachStatus;
+  } catch {
+    return null;
+  }
+}
+
+export async function setCoachKey(key: string): Promise<CoachStatus> {
+  const r = await fetch(`${serverUrl}/coach/key`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ key }),
+  });
+  if (!r.ok) throw new Error(`Could not save the key (${r.status})`);
+  return (await r.json()) as CoachStatus;
+}
+
+export interface CoachChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+/** One coach reply for a conversation. `context` is the compact JSON built by coachContext.ts. */
+export async function coachChat(messages: CoachChatMessage[], context: unknown): Promise<string> {
+  const r = await fetch(`${serverUrl}/coach`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messages, context }),
+  });
+  if (!r.ok) {
+    let detail = '';
+    try {
+      detail = ((await r.json()) as { detail?: string }).detail ?? '';
+    } catch {
+      /* no body */
+    }
+    throw new Error(detail || `The coach is not available (${r.status})`);
+  }
+  const j = (await r.json()) as { reply: string };
+  return j.reply;
+}
+
+/** A weekly practice plan from the coach, shaped as WeeklyPlan. `context.weekStart` must be set by the caller. */
+export async function coachPlan(context: unknown): Promise<WeeklyPlan> {
+  const r = await fetch(`${serverUrl}/coach/plan`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ context }),
+  });
+  if (!r.ok) {
+    let detail = '';
+    try {
+      detail = ((await r.json()) as { detail?: string }).detail ?? '';
+    } catch {
+      /* no body */
+    }
+    throw new Error(detail || `The coach is not available (${r.status})`);
+  }
+  return (await r.json()) as WeeklyPlan;
 }

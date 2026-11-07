@@ -476,6 +476,8 @@ function describe(name: string, x: Float32Array, trueHz: number) {
   check(res.measured && res.latencyMs === 70, `end to end: clicks scheduled 70 ms before they were heard → ${res.latencyMs} ms`);
   // pitch messages keep flowing while onset detection is on
   check(msgs.some((m) => typeof m.onset !== 'number' && typeof m.t === 'number'), 'pitch frames still posted during onset detection');
+}
+
 // the classic singers carry no voice-quality fields: no technique issue may fire on them
 for (const [name, r] of [['perfect', perfect], ['flat', flat], ['late', late], ['short', short], ['octave', oct]] as const) {
   const c = r.technique!.counts;
@@ -799,11 +801,11 @@ const fromResults = planCorrections(sharpFrames, pcA, { semitones: 0, startSongT
 check(fromResults.length === 1 && fromResults[0].noteId === 0 && fromResults[0].cents === 40, 'attempt note results are used when given (missed and in-tune notes skipped)');
 
 // DSP core on synthetic channels
-const SR = 8000;
-const sine = (hz: number, n: number, sr = SR) => Float32Array.from({ length: n }, (_, i) => 0.5 * Math.sin((2 * Math.PI * hz * i) / sr));
+const SRB = 8000;
+const sine = (hz: number, n: number, sr = SRB) => Float32Array.from({ length: n }, (_, i) => 0.5 * Math.sin((2 * Math.PI * hz * i) / sr));
 const identity: PitchShifter = { shift: async (ch) => ch.map((c) => Float32Array.from(c)) };
 const negate: PitchShifter = { shift: async (ch) => ch.map((c) => c.map((v) => -v)) };
-const shortOut: PitchShifter = { shift: async (ch) => ch.map((c) => c.slice(0, Math.max(0, c.length - Math.round(SR * 0.05))).map((v) => -v)) };
+const shortOut: PitchShifter = { shift: async (ch) => ch.map((c) => c.slice(0, Math.max(0, c.length - Math.round(SRB * 0.05))).map((v) => -v)) };
 /** Naive resampler: changes pitch (and length) like a tape machine; good enough to check the join logic. */
 const tape: PitchShifter = {
   shift: async (ch, sr, semis) => {
@@ -821,17 +823,17 @@ const tape: PitchShifter = {
     });
   },
 };
-const input = [sine(220, 2 * SR), sine(220, 2 * SR).map((v) => v * 0.5)];
+const input = [sine(220, 2 * SRB), sine(220, 2 * SRB).map((v) => v * 0.5)];
 const regions = [
   { noteId: 0, start: 0.5, end: 1.0, cents: 30 },
   { noteId: 1, start: 1.0, end: 1.5, cents: -40 },
 ];
-const same = await pitchCorrectChannels(input, SR, regions, identity);
+const same = await pitchCorrectChannels(input, SRB, regions, identity);
 check(same.length === 2 && same[0].length === input[0].length && same[0].every((v, i) => Math.abs(v - input[0][i]) < 1e-7) && same[1].every((v, i) => Math.abs(v - input[1][i]) < 1e-7), 'identity shifter: output equals input, same length and channel count');
-check(same[0] !== input[0] && input[0][SR] === sine(220, 2 * SR)[SR], 'input channels are not modified');
-const neg = await pitchCorrectChannels(input, SR, regions, negate);
-const F = Math.round(SR * 0.01);
-const at = (s: number) => Math.round(s * SR);
+check(same[0] !== input[0] && input[0][SRB] === sine(220, 2 * SRB)[SRB], 'input channels are not modified');
+const neg = await pitchCorrectChannels(input, SRB, regions, negate);
+const F = Math.round(SRB * 0.01);
+const at = (s: number) => Math.round(s * SRB);
 check(neg[0].length === input[0].length, 'negate shifter: length preserved');
 check(neg[0][at(0.25)] === input[0][at(0.25)] && neg[0][at(1.75)] === input[0][at(1.75)], 'outside the regions the original is untouched');
 check(Math.abs(neg[0][at(0.75)] + input[0][at(0.75)]) < 1e-6 && Math.abs(neg[0][at(1.25)] + input[0][at(1.25)]) < 1e-6, 'inside both regions the shifted audio replaces the original');
@@ -849,25 +851,25 @@ const wIn = ramp(0.5 - 0.005);
 const wOut = ramp(1.5 + 0.005);
 check(wIn > 0.3 && wIn < 0.7 && wOut > 0.3 && wOut < 0.7, `10 ms crossfades at the outer joins (weights ${wIn.toFixed(2)}, ${wOut.toFixed(2)})`);
 check(ramp(0.5 - 0.012) < 0.01 && ramp(1.5 + 0.012) < 0.01, 'crossfade is confined to 10 ms');
-const shortRes = await pitchCorrectChannels(input, SR, regions, shortOut);
+const shortRes = await pitchCorrectChannels(input, SRB, regions, shortOut);
 check(shortRes[0].length === input[0].length && Math.abs(shortRes[0][at(1.49)] + input[0][at(1.49)]) < 1e-6, 'a shifter that returns 50 ms less is still fitted over the whole region (extra source margin)');
-const empty = await pitchCorrectChannels(input, SR, [], identity);
+const empty = await pitchCorrectChannels(input, SRB, [], identity);
 check(empty[0].length === input[0].length, 'no regions: unchanged copy');
-const tiny = await pitchCorrectChannels(input, SR, [{ noteId: 0, start: 0.5, end: 0.505, cents: 30 }], negate);
+const tiny = await pitchCorrectChannels(input, SRB, [{ noteId: 0, start: 0.5, end: 0.505, cents: 30 }], negate);
 check(tiny[0].every((v, i) => v === input[0][i]), 'regions shorter than 20 ms are skipped');
 // real pitch change with the tape shifter: measure the frequency by zero crossings in the region
 const zc = (x: Float32Array, a: number, b: number) => {
   let c = 0;
   for (let i = a + 1; i < b; i++) if ((x[i - 1] < 0 && x[i] >= 0) || (x[i - 1] >= 0 && x[i] < 0)) c++;
-  return (c / 2) / ((b - a) / SR);
+  return (c / 2) / ((b - a) / SRB);
 };
-const taped = await pitchCorrectChannels([sine(220, 2 * SR)], SR, [{ noteId: 0, start: 0.5, end: 1.5, cents: -200 }], tape); // 200 cents flat → shift up 2 semitones
+const taped = await pitchCorrectChannels([sine(220, 2 * SRB)], SRB, [{ noteId: 0, start: 0.5, end: 1.5, cents: -200 }], tape); // 200 cents flat → shift up 2 semitones
 const fIn = zc(taped[0], at(0.55), at(1.4));
 const fOut = zc(taped[0], at(0.0), at(0.45));
 const fExp = 220 * Math.pow(2, 2 / 12);
 check(Math.abs(fIn - fExp) < 4 && Math.abs(fOut - 220) < 3, `tape shifter: ${fIn.toFixed(1)} Hz inside (expected ${fExp.toFixed(1)}), ${fOut.toFixed(1)} Hz outside`);
-check(taped[0].length === 2 * SR, 'total length unchanged after a real pitch shift');
-const wav = encodeWav([sine(440, 800)], SR);
+check(taped[0].length === 2 * SRB, 'total length unchanged after a real pitch shift');
+const wav = encodeWav([sine(440, 800)], SRB);
 check(wav.size === 44 + 800 * 2 && wav.type === 'audio/wav', `WAV encoder: ${wav.size} bytes`);
 
 // =====================================================================================
