@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export interface Series {
   name: string;
@@ -26,11 +26,29 @@ export default function LineChart({
   xFormat?: (v: number) => string;
 }) {
   const [hover, setHover] = useState<number | null>(null);
-  const W = 720;
-  const H = height;
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(720);
+  // draw in CSS pixels so axis text stays readable on narrow screens
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      const w = Math.round(entries[0]?.contentRect.width ?? 0);
+      if (w > 0) setWidth(Math.max(280, w));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const W = width;
+  const H = width < 480 ? Math.round(height * 0.85) : height;
   const pad = { l: 44, r: 16, t: 12, b: 28 };
   const all = series.flatMap((s) => s.points);
-  if (all.length === 0) return <div className="muted small">No data yet.</div>;
+  if (all.length === 0)
+    return (
+      <div ref={wrapRef} className="muted small">
+        No data yet.
+      </div>
+    );
   const xs = all.map((p) => p.x);
   const ys = all.map((p) => p.y);
   const x0 = Math.min(...xs);
@@ -47,7 +65,7 @@ export default function LineChart({
     return s.points.reduce((a, b) => (Math.abs(b.x - hoverX) < Math.abs(a.x - hoverX) ? b : a));
   };
   return (
-    <div className="chart col" style={{ gap: 6 }}>
+    <div ref={wrapRef} className="chart col" style={{ gap: 6 }}>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         onMouseMove={(e) => {

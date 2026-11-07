@@ -18,7 +18,7 @@ const browser = await chromium.launch({
     '--autoplay-policy=no-user-gesture-required',
   ],
 });
-const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ['microphone'] });
+const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ['microphone', 'notifications'], acceptDownloads: true });
 const page = await context.newPage();
 const errors = [];
 page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
@@ -65,6 +65,31 @@ await page.goto(baseUrl + '/');
 await page.waitForSelector('text=Practise next');
 await page.screenshot({ path: path.join(shots, '02-home.png') });
 log('home rendered with plan');
+
+// Home: "Your week" renders (rule-based without a coach), the goal ring shows, and the phone shell has a bottom tab bar.
+await page.waitForSelector('.week-plan .week-day', { timeout: 15000 });
+const weekSource = await page.locator('.week-plan .pill').first().innerText();
+const weekDays = await page.locator('.week-plan .week-day').count();
+log('week plan:', weekSource, '|', weekDays, 'days');
+if (weekDays !== 7) errors.push(`week plan has ${weekDays} days`);
+if (!expectServer && !/rule-based/.test(weekSource)) errors.push(`week plan without a server should be rule-based (got "${weekSource}")`);
+if ((await page.locator('.week-plan .week-item.rest').count()) < 1) errors.push('week plan has no rest day');
+if ((await page.locator('.goal-ring').count()) !== 1) errors.push('goal ring missing on Home');
+await page.screenshot({ path: path.join(shots, '02a-home-week.png'), fullPage: true });
+await page.setViewportSize({ width: 390, height: 844 });
+await page.goto(baseUrl + '/');
+await page.waitForSelector('text=Practise next');
+await page.waitForSelector('.tabbar a:has-text("Coach")', { state: 'visible', timeout: 10000 });
+const sidebarVisible = await page.locator('.sidebar').isVisible();
+const tabCount = await page.locator('.tabbar a').count();
+const overflow = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth }));
+log('mobile shell: tabs', tabCount, '| sidebar visible', sidebarVisible, '| widths', JSON.stringify(overflow));
+if (sidebarVisible) errors.push('sidebar still visible at 390 px');
+if (tabCount !== 5) errors.push(`expected 5 bottom tabs, got ${tabCount}`);
+if (overflow.scroll > overflow.inner + 1) errors.push(`horizontal overflow on Home at 390 px (${overflow.scroll} > ${overflow.inner})`);
+if (!(await page.locator('.mobile-only:has-text("Settings")').first().isVisible())) errors.push('Settings link missing from Today on the phone');
+await page.screenshot({ path: path.join(shots, '02b-home-mobile.png'), fullPage: true });
+await page.setViewportSize({ width: 1440, height: 900 });
 
 // Calibration: does the worklet produce pitch from the fake mic?
 await page.goto(baseUrl + '/calibration');
@@ -346,6 +371,72 @@ await page.click('text=End session');
 await page.waitForSelector('text=Session recap');
 await page.screenshot({ path: path.join(shots, '15-recap.png') });
 log('recap rendered');
+
+// Progress additions: technique trends, streak calendar and game bests cards render.
+await page.goto(baseUrl + '/progress');
+await page.waitForSelector('[data-testid=technique-trends]');
+for (const id of ['streak-calendar', 'game-bests']) if ((await page.locator(`[data-testid=${id}]`).count()) !== 1) errors.push(`progress card ${id} missing`);
+const calCells = await page.locator('.streak-cell').count();
+if (calCells !== 84) errors.push(`streak calendar has ${calCells} cells, expected 84`);
+log('progress additions rendered, calendar cells:', calCells);
+
+// Coach page: without a server it explains that it needs the analysis service; with one, it shows the chat or the key card.
+await page.goto(baseUrl + '/coach');
+if (expectServer) {
+  await page.waitForSelector('text=/Set up the coach|Ask anything about your singing/', { timeout: 15000 });
+} else {
+  await page.waitForSelector('text=The coach needs the analysis service', { timeout: 15000 });
+}
+await page.waitForSelector('.coach-compose textarea');
+await page.click('.quick-prompts button >> nth=0');
+const draft = await page.locator('.coach-compose textarea').inputValue();
+if (!expectServer && !/flat on high notes/.test(draft)) errors.push(`quick prompt did not land in the box without a server (got "${draft}")`);
+await page.screenshot({ path: path.join(shots, '16-coach.png') });
+log('coach page rendered;', expectServer ? 'server mode' : 'offline card shown');
+
+// Recap → "Ask the coach about this session" hands the question over.
+await page.goto(baseUrl + '/progress');
+await page.click('a:has-text("Recap") >> nth=0');
+await page.waitForSelector('[data-testid=ask-coach]');
+await page.click('[data-testid=ask-coach]');
+await page.waitForURL(/\/coach/);
+await page.waitForFunction(() => /session/.test(document.querySelector('.coach-compose textarea')?.value || ''), null, { timeout: 5000 });
+log('recap handed its question to the coach');
+
+// Settings: daily habit card, and export triggers a download of a parsable .voicecoach.json file.
+await page.goto(baseUrl + '/settings');
+await page.waitForSelector('#habits');
+await page.fill('input[type=time]', '19:30');
+await page.waitForSelector('text=/Reminder at|Next:/', { timeout: 5000 });
+const [download] = await Promise.all([page.waitForEvent('download', { timeout: 20000 }), page.click('[data-testid=export-btn]')]);
+const dlName = download.suggestedFilename();
+const dlPath = path.join(audioDir, 'export-test.json');
+await download.saveAs(dlPath);
+let exported = null;
+try {
+  exported = JSON.parse(fs.readFileSync(dlPath, 'utf8'));
+} catch (e) {
+  errors.push(`export file is not JSON: ${e.message}`);
+}
+log('export:', dlName, '|', exported ? `${exported.songs.length} songs, ${exported.attempts.length} attempts, ${exported.sessions.length} sessions, profile ${exported.profile?.name}` : 'unreadable');
+if (!dlName.endsWith('.voicecoach.json')) errors.push(`export file name "${dlName}" should end with .voicecoach.json`);
+if (exported && (exported.app !== 'voice-coach' || exported.songs.length !== 1 || exported.attempts.length < 1 || exported.profile?.reminderTime !== '19:30')) errors.push('export content is incomplete');
+await page.waitForSelector('text=/Saved voice-coach-/');
+await page.screenshot({ path: path.join(shots, '17-settings.png'), fullPage: true });
+await page.setViewportSize({ width: 390, height: 844 });
+await page.goto(baseUrl + '/settings');
+await page.waitForSelector('#habits');
+await page.screenshot({ path: path.join(shots, '17b-settings-mobile.png'), fullPage: true });
+await page.goto(baseUrl + '/coach');
+await page.waitForSelector('.coach-compose textarea');
+await page.screenshot({ path: path.join(shots, '16b-coach-mobile.png'), fullPage: true });
+await page.goto(baseUrl + '/progress');
+await page.waitForSelector('[data-testid=technique-trends]');
+await page.screenshot({ path: path.join(shots, '14b-progress-mobile.png'), fullPage: true });
+const progressOverflow = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth }));
+if (progressOverflow.scroll > progressOverflow.inner + 1) errors.push(`horizontal overflow on Progress at 390 px (${progressOverflow.scroll} > ${progressOverflow.inner})`);
+await page.setViewportSize({ width: 1440, height: 900 });
+log('settings export and phone screenshots done');
 
 await browser.close();
 if (errors.length) {

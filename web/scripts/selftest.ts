@@ -28,6 +28,11 @@ import { KaraokeScorer, starsFor, multiplierFor } from '../src/lib/game';
 import { dailyGoalMinutes, nextReminderAt, streakDays, todayMinutes, longestStreak } from '../src/lib/habits';
 import { pitchCorrectChannels, planCorrections, encodeWav, type PitchShifter } from '../src/lib/audio/pitchCorrect';
 import { buildPlan } from '../src/lib/plan';
+import { buildCoachContext, contextBytes, isoDay, MAX_CONTEXT_BYTES, topIssueKinds, weekStartOf } from '../src/lib/coachContext';
+import { normalizeWeeklyPlan, REST_DAY_INDEX, rulesWeeklyPlan, weekdayIndex } from '../src/lib/weeklyPlan';
+import { gameBests, streakCalendar, techniqueTrend } from '../src/lib/progressStats';
+import { base64ToBytes, blobToData, bytesToBase64, dataToBlob, describeSummary, exportFileName, mergeProfiles, parseExport, summarize } from '../src/lib/store/export';
+import { reminderStatusText, scheduleReminder } from '../src/lib/notifications';
 
 let failures = 0;
 function check(cond: boolean, msg: string) {
@@ -930,6 +935,180 @@ check(exerciseForIssue('breathy')?.id === 'clear-tone' && exerciseForIssue('crac
 for (const e of EXERCISES) {
   const p = e.build(profile);
   if (p.kind === 'pitched') check(p.analysis.notes.length > 0 && p.analysis.phrases.length > 0 && p.analysis.duration > 0, `exercise "${e.name}" builds a valid analysis`);
+}
+
+// ---- app shell: coach context, weekly plan, progress stats, export round trip, reminders ----
+{
+  const mon = new Date(2026, 10, 2, 0, 0, 0, 0).getTime(); // Monday 2 Nov 2026 local
+  const wed = new Date(2026, 10, 4, 15, 30).getTime();
+  const sun = new Date(2026, 10, 8, 23, 59).getTime();
+  check(weekStartOf(wed) === mon && weekStartOf(sun) === mon && weekStartOf(mon) === mon, 'weekStartOf: Monday 00:00 local for Mon, Wed and Sun');
+  check(weekdayIndex(mon) === 0 && weekdayIndex(wed) === 2 && weekdayIndex(sun) === 6, 'weekdayIndex: Mon=0 … Sun=6');
+  check(isoDay(wed) === '2026-11-04', `isoDay → ${isoDay(wed)}`);
+
+  // a singer with many attempts and long titles still fits in 10 kB
+  const manySongs: SongRecord[] = Array.from({ length: 30 }, (_, i) => ({ ...songRec, id: `s${i}`, title: `A rather long song title number ${i} that goes on and on and on`, artist: 'Someone With A Long Name' }));
+  const manyAttempts: PhraseAttempt[] = Array.from({ length: 200 }, (_, i) => ({
+    ...attemptWith(40 + (i % 60), 1, i),
+    songId: `s${i % 30}`,
+    phraseIndex: i % 4,
+    date: Date.now() - (200 - i) * 3600000,
+    issues: [
+      { noteId: 0, kind: i % 3 === 0 ? 'flat' : 'late', amount: 30, text: 'x', severity: 0.6 },
+      { noteId: 1, kind: 'short', amount: 0.5, text: 'y', severity: 0.3 },
+    ],
+  }));
+  const sess: SessionRecord[] = [{ id: 'ss1', startedAt: Date.now() - 3600000, endedAt: null, activeSeconds: 300, songIds: [], phraseAttemptIds: [], exerciseResultIds: [], recap: null }];
+  const ctx = buildCoachContext(profile, manyAttempts, manySongs, sess);
+  check(contextBytes(ctx) <= MAX_CONTEXT_BYTES, `coach context stays under 10 kB (${contextBytes(ctx)} bytes)`);
+  check(ctx.recentAttempts.length <= 30 && ctx.recentAttempts.length >= 8, `context keeps the last attempts (${ctx.recentAttempts.length})`);
+  check(ctx.recentAttempts[ctx.recentAttempts.length - 1].overall === manyAttempts[199].scores.overall, 'context attempts end with the newest attempt');
+  check(ctx.dominantIssues[0]?.kind === 'late' && ctx.dominantIssues.some((d) => d.kind === 'flat'), `dominant issues: ${ctx.dominantIssues.map((d) => `${d.kind}×${d.count}`).join(', ')}`);
+  check(ctx.weakest !== null && ctx.range?.low === 'C3' && ctx.range.high === 'C5' && ctx.habits.todayMinutes === 5 && ctx.habits.goal === 10, 'context carries range, weakest criterion and habits');
+  check(topIssueKinds(manyAttempts[0]).length === 2 && topIssueKinds(manyAttempts[0])[0] === 'flat', 'topIssueKinds orders by severity');
+  const smallCtx = buildCoachContext(profile, [], [], []);
+  check(smallCtx.recentAttempts.length === 0 && smallCtx.weakest === null && smallCtx.dominantIssues.length === 0 && typeof smallCtx.weekStart === 'number', 'empty history gives an empty but valid context');
+
+  // rules weekly plan: 7 days, one rest day, warm-up every practice day, today's slot carries the due reviews
+  // (the review states above are due relative to the real clock, so this part runs at planNow)
+  const dayPlan = buildPlan(profile, [], [], [songRec], reviewStates, planNow);
+  const wk = rulesWeeklyPlan(dayPlan, weekStartOf(planNow), planNow);
+  check(wk.days.length === 7 && wk.days.map((d) => d.day).join(',') === 'Mon,Tue,Wed,Thu,Fri,Sat,Sun' && wk.source === 'rules', 'rules plan has seven labelled days');
+  check(wk.days.filter((d) => d.items.some((i) => i.kind === 'rest')).length === 1 && wk.days[REST_DAY_INDEX].items[0].kind === 'rest', 'exactly one rest day');
+  check(wk.days.filter((_, i) => i !== REST_DAY_INDEX).every((d) => d.items[0].kind === 'exercise' && /warm/i.test(d.items[0].title)), 'every practice day starts with the warm-up');
+  const todayIdx = weekdayIndex(planNow) === REST_DAY_INDEX ? (weekdayIndex(planNow) + 1) % 7 : weekdayIndex(planNow);
+  const todayItems = wk.days[todayIdx].items;
+  check(todayItems.filter((i) => i.kind === 'phrase' && i.songId === 'song1').length >= 2, `due reviews land on today (${wk.days[todayIdx].day} has ${todayItems.filter((i) => i.kind === 'phrase').length} phrase items)`);
+  check(wk.days.filter((_, i) => i !== todayIdx).every((d) => d.items.every((i) => !(i.kind === 'phrase' && i.phraseIndex === 1))), 'reviews are not repeated on other days');
+  const emptyWk = rulesWeeklyPlan(buildPlan(profile, [], [], [], undefined, wed), weekStartOf(wed), wed);
+  check(emptyWk.days.every((d) => d.items.length > 0) && emptyWk.days.some((d) => d.items.some((i) => i.kind === 'range-test' || i.kind === 'exercise')), 'a singer with no songs still gets a full week');
+
+  // normalising a coach plan: unknown ids dropped, days completed, kinds validated
+  const raw = {
+    summary: 'Focus on breath this week.',
+    days: [
+      { day: 'Monday', focus: 'Breath', items: [{ kind: 'exercise', title: 'Long hiss', exerciseId: 'breath-support', minutes: 5 }, { kind: 'exercise', title: 'Bogus', exerciseId: 'not-an-exercise', minutes: 5 }] },
+      { day: 'Tue', focus: 'Song', items: [{ kind: 'phrase', title: 'Phrase 2', songId: 'song1', phraseIndex: 1, minutes: 6 }, { kind: 'phrase', title: 'Phrase 99', songId: 'song1', phraseIndex: 99, minutes: 6 }, { kind: 'dance', title: 'nope', minutes: 3 }] },
+      { day: 'Fri', items: [{ kind: 'song', title: 'Gone song', songId: 'nope', minutes: 1000 }] },
+    ],
+  };
+  const norm = normalizeWeeklyPlan(raw, mon, [songRec]);
+  check(!!norm && norm.days.length === 7 && norm.source === 'coach' && norm.weekStart === mon, 'coach plan normalised to seven days');
+  check(!!norm && norm.days[0].items.length === 2 && norm.days[0].items[0].exerciseId === 'breath-support' && norm.days[0].items[1].exerciseId === null, 'unknown exercise id dropped, item kept');
+  check(!!norm && norm.days[1].items.length === 2 && norm.days[1].items[0].phraseIndex === 1 && norm.days[1].items[1].phraseIndex === null, 'phrase index out of range → null; unknown kind dropped');
+  check(!!norm && norm.days[4].items[0].songId === null && norm.days[4].items[0].minutes === 60 && norm.days[3].items[0].kind === 'rest', 'unknown song id dropped, minutes capped, missing days are rest');
+  check(normalizeWeeklyPlan({ days: [] }, mon, []) === null && normalizeWeeklyPlan('nope', mon, []) === null && normalizeWeeklyPlan({ days: [{ day: 'Funday', items: [] }] }, mon, []) === null, 'unusable plans are rejected');
+
+  // technique trend from frames
+  const mk = (t: number, breathiness?: number, pressed?: number, hz = 220): PitchFrame => ({ t, hz, midi: 57, rms: 0.1, db: -20, clarity: 0.9, breathiness, pressed, voicing: hz > 0 ? 0.9 : 0.1 });
+  const day1 = new Date(2026, 10, 2, 10).getTime();
+  const day2 = new Date(2026, 10, 3, 10).getTime();
+  const tAttempts: PhraseAttempt[] = [
+    { ...attemptWith(70, 1, 1), date: day1, frames: [mk(0, 0.2, 0.1), mk(0.01, 0.4, 0.3), mk(0.02, 0.9, 0.9, 0)] }, // unvoiced frame ignored
+    { ...attemptWith(70, 1, 2), date: day1, frames: [mk(0, 0.6, 0.5), mk(0.01, 0.6, 0.5)] },
+    { ...attemptWith(70, 1, 3), date: day2, frames: [mk(0, undefined, 0.8)] },
+    { ...attemptWith(70, 1, 4), date: day2 + 1000, frames: [mk(0)] }, // no fields at all
+  ];
+  const tt = techniqueTrend(tAttempts);
+  check(tt.length === 2 && Math.abs(tt[0].breathiness! - 0.45) < 1e-9 && Math.abs(tt[0].pressed! - 0.35) < 1e-9, `technique trend day 1: frame-weighted means (${tt[0]?.breathiness}, ${tt[0]?.pressed})`);
+  check(tt[1].breathiness === null && tt[1].pressed === 0.8, 'technique trend day 2: breathiness absent → null, pressed kept');
+  check(techniqueTrend([attemptWith(50, 1)]).length === 0, 'attempts without voice-quality fields produce no trend points');
+  const cal = streakCalendar(sess, Date.now(), 12);
+  check(cal.length === 12 && cal.every((r) => r.length === 7) && cal[11].some((c) => c.today) && cal.flat().filter((c) => c.minutes > 0).length === 1, 'streak calendar: 12 rows × 7, today marked, one active day');
+  check(cal[11].findIndex((c) => c.today) === weekdayIndex(Date.now()) && cal.flat().every((c, i, arr) => i === 0 || c.day > arr[i - 1].day), 'calendar rows run Monday → Sunday in order');
+  const gb = gameBests(
+    [
+      { id: 'g1', songId: 'song1', date: 1, score: 60, points: 1000, stars: 2, maxCombo: 5, semitones: 0, tempo: 1, perPhrase: [] },
+      { id: 'g2', songId: 'song1', date: 2, score: 70, points: 1500, stars: 3, maxCombo: 9, semitones: 0, tempo: 1, perPhrase: [] },
+      { id: 'g3', songId: 'other', date: 3, score: 90, points: 9, stars: 5, maxCombo: 1, semitones: 0, tempo: 1, perPhrase: [] },
+    ],
+    [songRec],
+  );
+  check(gb.length === 1 && gb[0].best.id === 'g2' && gb[0].plays === 2, 'game bests: best points per existing song, plays counted');
+
+  // export round trip of binary data and the file parser
+  const bytes = new Uint8Array(70000);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 7 + 13) & 255;
+  const back = base64ToBytes(bytesToBase64(bytes));
+  check(back.length === bytes.length && back.every((b, i) => b === bytes[i]), 'base64 round trip keeps 70 kB of bytes intact (chunked encoder)');
+  const blobData = await blobToData(new Blob([bytes], { type: 'audio/webm' }));
+  const blobBack = dataToBlob(blobData);
+  check(blobData.mime === 'audio/webm' && blobData.bytes === 70000 && blobBack.size === 70000 && blobBack.type === 'audio/webm', 'blob ↔ base64 keeps size and mime');
+  const file = {
+    app: 'voice-coach',
+    version: 1,
+    exportedAt: 5,
+    includesAudio: false,
+    profile: { ...profile, name: 'Imported' },
+    songs: [songRec, { id: 'broken' }],
+    attempts: [attemptWith(80, 1, 1), { nope: true }],
+    sessions: sess,
+    exerciseResults: [],
+    reviews: [reviewStates[0], { songId: 'x' }],
+    games: [],
+    coachThreads: [{ id: 'c1', createdAt: 1, updatedAt: 2, title: 't' }],
+    settings: [{ key: 'weeklyPlan', value: 1 }, { value: 2 }],
+    recordings: [{ id: 'r1', blob: { base64: 'AAAA', mime: 'audio/webm', bytes: 3 } }, { id: 'r2', blob: null }],
+    assets: [],
+  };
+  const parsed = parseExport(JSON.stringify(file));
+  const sum = summarize(parsed);
+  check(sum.songs === 1 && sum.attempts === 1 && sum.reviews === 1 && sum.coachThreads === 1 && sum.settings === 1 && sum.recordings === 1 && sum.profile, `parseExport drops malformed records: ${describeSummary(sum)}`);
+  check(parsed.coachThreads[0].messages.length === 0, 'a thread without messages gets an empty list');
+  let threw = '';
+  for (const bad of ['not json', '{"app":"other"}', '{"app":"voice-coach","version":99}']) {
+    try {
+      parseExport(bad);
+    } catch (e) {
+      threw += (e as Error).message[0];
+    }
+  }
+  check(threw.length === 3, 'parseExport rejects non-JSON, foreign and newer files with a message');
+  const merged = mergeProfiles({ ...profile, rangeTests: [{ ...profile.rangeTests[0], date: 1 }], onboardingDone: true }, { ...profile, name: 'New', rangeTests: [{ ...profile.rangeTests[0], date: 2 }], onboardingDone: false });
+  check(merged.name === 'New' && merged.rangeTests.length === 2 && merged.rangeTests[0].date === 1 && merged.onboardingDone, 'mergeProfiles: imported wins, range tests unioned, onboarding kept');
+  check(exportFileName(wed).endsWith('.voicecoach.json') && exportFileName(wed).includes('2026-11-04'), `export file name: ${exportFileName(wed)}`);
+
+  // reminder scheduling with a fake clock
+  {
+    const realSet = globalThis.setTimeout;
+    const realClear = globalThis.clearTimeout;
+    const timers: { at: number; fn: () => void; id: number }[] = [];
+    let clock = new Date(2026, 10, 4, 18, 0).getTime();
+    let nextId = 1;
+    (globalThis as unknown as { setTimeout: unknown }).setTimeout = (fn: () => void, ms: number) => {
+      const id = nextId++;
+      timers.push({ at: clock + ms, fn, id });
+      return id;
+    };
+    (globalThis as unknown as { clearTimeout: unknown }).clearTimeout = (id: number) => {
+      const i = timers.findIndex((t) => t.id === id);
+      if (i >= 0) timers.splice(i, 1);
+    };
+    const fired: number[] = [];
+    const cancel = scheduleReminder({ reminderTime: '19:30' }, (at) => fired.push(at), () => clock);
+    const run = () => {
+      timers.sort((a, b) => a.at - b.at);
+      const t = timers.shift();
+      if (!t) return false;
+      clock = Math.max(clock, t.at);
+      t.fn();
+      return true;
+    };
+    run();
+    check(fired.length === 1 && new Date(fired[0]).getHours() === 19 && new Date(fired[0]).getMinutes() === 30, 'reminder fires at the set time today');
+    run(); // re-arm delay
+    run(); // tomorrow's firing
+    check(fired.length === 2 && fired[1] - fired[0] === 24 * 3600000, 'reminder re-arms for the next day');
+    cancel();
+    check(timers.length === 0, 'cancel clears the pending timer');
+    const none = scheduleReminder({ reminderTime: null }, () => fired.push(0), () => clock);
+    none();
+    check(fired.length === 2 && timers.length === 0, 'no reminder time → nothing scheduled');
+    globalThis.setTimeout = realSet;
+    globalThis.clearTimeout = realClear;
+  }
+  check(reminderStatusText({ reminderTime: null }, 'granted') === 'Off.' && /closed tab cannot remind/.test(reminderStatusText({ reminderTime: '08:00' }, 'granted')), 'reminder status text is honest about closed tabs');
+  check(/blocked/.test(reminderStatusText({ reminderTime: '08:00' }, 'denied')) && /cannot show/.test(reminderStatusText({ reminderTime: '08:00' }, 'unsupported')), 'reminder status text explains denied and unsupported');
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

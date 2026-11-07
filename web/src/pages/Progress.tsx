@@ -1,31 +1,39 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useApp } from '../lib/AppContext';
-import { listAttempts, listExerciseResults, listSessions, listSongs } from '../lib/store/db';
-import type { ExerciseResult, PhraseAttempt, SessionRecord, SongRecord } from '../lib/types';
+import { listAttempts, listExerciseResults, listGames, listSessions, listSongs } from '../lib/store/db';
+import type { ExerciseResult, GameResult, PhraseAttempt, SessionRecord, SongRecord } from '../lib/types';
 import LineChart from '../components/LineChart';
+import StreakCalendar from '../components/shell/StreakCalendar';
 import { midiToName } from '../lib/music/notes';
 import { weakestCriterion, dominantIssue } from '../lib/plan';
 import { tipFor } from '../lib/scoring/score';
 import { exerciseById } from '../lib/exercises/library';
+import { dailyGoalMinutes, longestStreak, streakDays } from '../lib/habits';
+import { gameBests, streakCalendar, techniqueTrend } from '../lib/progressStats';
 
 const INDIGO = '#4f46e5';
 const AMBER = '#d97706';
 
 export default function Progress() {
-  const { profile } = useApp();
+  const { profile, session } = useApp();
   const [attempts, setAttempts] = useState<PhraseAttempt[]>([]);
   const [songs, setSongs] = useState<SongRecord[]>([]);
-  const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const [storedSessions, setStoredSessions] = useState<SessionRecord[]>([]);
   const [ex, setEx] = useState<ExerciseResult[]>([]);
+  const [games, setGames] = useState<GameResult[]>([]);
   const [songFilter, setSongFilter] = useState<string>('all');
   useEffect(() => {
     listAttempts().then((a) => setAttempts(a.sort((x, y) => x.date - y.date)));
     listSongs().then(setSongs);
-    listSessions().then(setSessions);
+    listSessions().then(setStoredSessions);
     listExerciseResults().then(setEx);
+    listGames().then(setGames);
   }, []);
   if (!profile) return null;
+
+  const now = Date.now();
+  const sessions = storedSessions.some((s) => s.id === session.id) ? storedSessions.map((s) => (s.id === session.id ? session : s)) : [...storedSessions, session];
 
   // daily average score
   const byDay = new Map<string, number[]>();
@@ -54,6 +62,13 @@ export default function Progress() {
   const dom = dominantIssue(attempts.slice(-40));
   const tip = dom ? tipFor(dom) : null;
 
+  // technique: airy and pushed per day, from the voice-quality fields of the attempt frames
+  const tech = techniqueTrend(songFilter === 'all' ? attempts : attempts.filter((a) => a.songId === songFilter));
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  const airy = tech.filter((t) => t.breathiness !== null).map((t) => ({ x: t.day, y: t.breathiness!, label: `${pct(t.breathiness!)} airy over ${t.frames} frames` }));
+  const pushed = tech.filter((t) => t.pressed !== null).map((t) => ({ x: t.day, y: t.pressed!, label: `${pct(t.pressed!)} pushed over ${t.frames} frames` }));
+  const latestTech = tech[tech.length - 1] ?? null;
+
   const perSong = songs.map((s) => {
     const mine = attempts.filter((a) => a.songId === s.id);
     const best = new Map<number, PhraseAttempt>();
@@ -65,6 +80,10 @@ export default function Progress() {
   });
 
   const totalMin = Math.round(sessions.reduce((a, s) => a + s.activeSeconds, 0) / 60);
+  const calendar = streakCalendar(sessions, now, 12);
+  const streak = streakDays(sessions, now);
+  const best = longestStreak(sessions);
+  const bests = gameBests(games, songs);
 
   return (
     <div className="col" style={{ gap: 18 }}>
@@ -96,9 +115,13 @@ export default function Progress() {
           </div>
         </div>
         <div className="card">
-          <div className="tiny muted">Pitch accuracy (range test)</div>
-          <div style={{ fontSize: '1.4rem', fontWeight: 800 }}>{profile.rangeTests.length ? `${profile.rangeTests.at(-1)!.accuracyScore}/100` : '—'}</div>
-          <div className="small muted">{profile.rangeTests.length ? `avg ${profile.rangeTests.at(-1)!.accuracyCents}¢ off the target` : ''}</div>
+          <div className="tiny muted">Streak</div>
+          <div style={{ fontSize: '1.4rem', fontWeight: 800 }}>
+            {streak} day{streak === 1 ? '' : 's'}
+          </div>
+          <div className="small muted">
+            Longest ever: {best} day{best === 1 ? '' : 's'} · pitch accuracy in the range test: {profile.rangeTests.length ? `${profile.rangeTests.at(-1)!.accuracyScore}/100` : '—'}
+          </div>
         </div>
       </div>
       <div className="card">
@@ -114,6 +137,67 @@ export default function Progress() {
           </select>
         </div>
         <LineChart series={[{ name: 'Overall', color: INDIGO, points: trend }, { name: 'Pitch', color: AMBER, points: pitchTrend }]} yMin={0} yMax={100} />
+      </div>
+      <div className="card" data-testid="technique-trends">
+        <h3>Technique over time</h3>
+        <p className="small muted">
+          How airy (breathy) and how pushed (strained) your voice sounded on average while singing, from the live voice-quality analysis. Lower is cleaner
+          and more relaxed; a little air on soft phrases is fine.
+          {latestTech && latestTech.breathiness !== null && latestTech.pressed !== null
+            ? ` Latest day: ${pct(latestTech.breathiness)} airy, ${pct(latestTech.pressed)} pushed.`
+            : ''}
+        </p>
+        {airy.length + pushed.length === 0 ? (
+          <div className="muted small">No voice-quality data yet. It is recorded with every take from now on; sing a phrase and come back.</div>
+        ) : (
+          <LineChart series={[{ name: 'Airy', color: INDIGO, points: airy }, { name: 'Pushed', color: AMBER, points: pushed }]} yMin={0} yMax={1} yFormat={pct} />
+        )}
+      </div>
+      <div className="grid cols-2">
+        <div className="card" data-testid="streak-calendar">
+          <h3>Last 12 weeks</h3>
+          <p className="small muted">Every day you sang. A day counts from one minute of singing; the goal is {dailyGoalMinutes(profile)} minutes.</p>
+          <StreakCalendar rows={calendar} goalMinutes={dailyGoalMinutes(profile)} />
+        </div>
+        <div className="card" data-testid="game-bests">
+          <h3>Game bests</h3>
+          <p className="small muted">Your best karaoke run per song (points decide, then the score). Just for fun: the honest scores are above.</p>
+          {bests.length === 0 ? (
+            <div className="muted small">No games played yet. Open a song and pick Game mode.</div>
+          ) : (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Song</th>
+                    <th>Stars</th>
+                    <th>Points</th>
+                    <th>Score</th>
+                    <th>Best combo</th>
+                    <th>Plays</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {bests.map(({ song, best: g, plays }) => (
+                    <tr key={song.id}>
+                      <td>
+                        <Link to={`/practice/${song.id}`}>{song.title}</Link>
+                        <div className="tiny muted">{new Date(g.date).toLocaleDateString()}</div>
+                      </td>
+                      <td>
+                        <Stars n={g.stars} />
+                      </td>
+                      <td>{g.points.toLocaleString()}</td>
+                      <td>{Math.round(g.score)}</td>
+                      <td>×{g.maxCombo}</td>
+                      <td>{plays}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
       <div className="card">
         <h3>Range over time</h3>
@@ -153,32 +237,49 @@ export default function Progress() {
       </div>
       <div className="card">
         <h3>Sessions</h3>
-        <table className="table">
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Singing</th>
-              <th>Takes</th>
-              <th>Average</th>
-              <th>Biggest fix</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {[...sessions].reverse().slice(0, 15).map((s) => (
-              <tr key={s.id}>
-                <td>{new Date(s.startedAt).toLocaleString()}</td>
-                <td>{Math.round(s.activeSeconds / 60)} min</td>
-                <td>{s.phraseAttemptIds.length}</td>
-                <td>{s.recap?.avgScore ?? '—'}</td>
-                <td className="small muted">{s.recap?.biggestFix.split('.')[0] ?? (s.endedAt ? '—' : 'in progress')}</td>
-                <td>{s.recap && <Link to={`/recap/${s.id}`}>Recap</Link>}</td>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Singing</th>
+                <th>Takes</th>
+                <th>Average</th>
+                <th>Biggest fix</th>
+                <th></th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {[...sessions]
+                .sort((a, b) => b.startedAt - a.startedAt)
+                .slice(0, 15)
+                .map((s) => (
+                  <tr key={s.id}>
+                    <td>{new Date(s.startedAt).toLocaleString()}</td>
+                    <td>{Math.round(s.activeSeconds / 60)} min</td>
+                    <td>{s.phraseAttemptIds.length}</td>
+                    <td>{s.recap?.avgScore ?? '—'}</td>
+                    <td className="small muted">{s.recap?.biggestFix.split('.')[0] ?? (s.endedAt ? '—' : 'in progress')}</td>
+                    <td>{s.recap && <Link to={`/recap/${s.id}`}>Recap</Link>}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
+  );
+}
+
+function Stars({ n }: { n: number }) {
+  return (
+    <span className="stars" aria-label={`${n} of 5 stars`}>
+      {Array.from({ length: 5 }, (_, i) => (
+        <span key={i} className={i < n ? '' : 'off'}>
+          ★
+        </span>
+      ))}
+    </span>
   );
 }
 

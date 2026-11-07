@@ -30,6 +30,8 @@ export interface Health {
   separation: 'demucs' | 'unavailable';
   device: string;
   version: string;
+  /** Speech recognition (word timing) installed on the server. Absent on older servers. */
+  whisper?: boolean;
 }
 
 export interface JobStatus {
@@ -56,10 +58,12 @@ export async function health(timeoutMs = 2500): Promise<Health | null> {
   }
 }
 
-export async function startAnalysis(file: Blob, filename: string, separate: boolean): Promise<string> {
+export async function startAnalysis(file: Blob, filename: string, separate: boolean, options?: { words?: boolean }): Promise<string> {
   const fd = new FormData();
   fd.append('file', file, filename);
   fd.append('separate', separate ? 'true' : 'false');
+  // opt-in/out of word timing by speech recognition; servers without it ignore the field
+  if (options && options.words !== undefined) fd.append('words', options.words ? 'true' : 'false');
   const r = await fetch(`${serverUrl}/analyze`, { method: 'POST', body: fd });
   if (!r.ok) throw new Error(`Analysis server error ${r.status}`);
   const j = (await r.json()) as { jobId: string };

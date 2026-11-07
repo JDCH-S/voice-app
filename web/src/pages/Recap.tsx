@@ -4,6 +4,7 @@ import { listSessions } from '../lib/store/db';
 import type { SessionRecord } from '../lib/types';
 import ScoreRing from '../components/ScoreRing';
 import { exerciseById } from '../lib/exercises/library';
+import { recapPrompt } from '../lib/coachContext';
 
 export default function Recap() {
   const { sessionId } = useParams();
@@ -56,6 +57,9 @@ export default function Recap() {
           </Link>
           <Link to="/progress" className="btn">
             See progress
+          </Link>
+          <Link to={`/coach?q=${encodeURIComponent(recapPrompt(s))}`} className="btn" data-testid="ask-coach">
+            Ask the coach about this session
           </Link>
         </div>
       </div>
