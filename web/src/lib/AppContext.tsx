@@ -77,6 +77,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     recheckServer();
   }, [recheckServer]);
 
+  // keep the live analyser's idea of the singer's range and level in step with the profile
+  useEffect(() => {
+    if (!profile) return;
+    const rt = profile.rangeTests[profile.rangeTests.length - 1];
+    mic.setRange(rt ? rt.lowMidi : null, rt ? rt.highMidi : null);
+    mic.setReferenceLevel(profile.calibration ? profile.calibration.singingLevelDb : null);
+  }, [profile]);
+
   const updateProfile = useCallback(async (patch: Partial<Profile> | ((p: Profile) => Profile)) => {
     const base = await loadProfile();
     const next = typeof patch === 'function' ? patch(base) : { ...base, ...patch };

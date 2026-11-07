@@ -74,7 +74,14 @@ await page.click('text=Next: sing a note');
 await page.waitForTimeout(1500);
 const noteText = await page.locator('.big-note').first().innerText();
 log('pitch meter during sing step shows:', noteText);
-await page.waitForSelector('text=Microphone ready', { timeout: 15000 });
+// Delay step: the fake mic plays the voice file, not the room, so the clicks are not heard and the
+// wizard must fall back to the estimate without failing.
+await page.waitForSelector('text=Play the clicks', { timeout: 15000 });
+await page.click('text=Play the clicks');
+await page.waitForSelector('text=Microphone ready', { timeout: 20000 });
+const latencyText = await page.locator('.latency-result').first().innerText();
+log('calibration delay result:', latencyText);
+if (!/\d+ ms \((measured|estimated)\)/.test(latencyText)) errors.push(`delay step did not report a result (got "${latencyText}")`);
 await page.screenshot({ path: path.join(shots, '03-calibration.png') });
 if (!/^[A-G]#?\d$/.test(noteText.trim())) errors.push(`pitch meter did not show a note (got "${noteText}")`);
 
