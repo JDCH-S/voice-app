@@ -18,6 +18,16 @@ import {
   voiceQualityFor,
 } from '../src/lib/audio/voiceQuality';
 import { latencyFromOnsets } from '../src/lib/audio/MicAnalyzer';
+import { midiToHz, midiToName } from '../src/lib/music/notes';
+import type { AdaptiveSettings, PhraseAttempt, PitchFrame, Profile, RecordingRecord, ReviewState, SessionRecord, SongRecord } from '../src/lib/types';
+import { analysisFromNotes, exerciseById, exerciseForIssue, EXERCISES, type NoteSpec } from '../src/lib/exercises/library';
+import { detectTechnique, describeTechnique } from '../src/lib/scoring/technique';
+import { defaultSettings, masteryFor, nextSettings } from '../src/lib/adaptive';
+import { DAY_MS, dueReviews, firstAndLatest, updateReview } from '../src/lib/review';
+import { KaraokeScorer, starsFor, multiplierFor } from '../src/lib/game';
+import { dailyGoalMinutes, nextReminderAt, streakDays, todayMinutes, longestStreak } from '../src/lib/habits';
+import { pitchCorrectChannels, planCorrections, encodeWav, type PitchShifter } from '../src/lib/audio/pitchCorrect';
+import { buildPlan } from '../src/lib/plan';
 
 let failures = 0;
 function check(cond: boolean, msg: string) {
@@ -466,6 +476,430 @@ function describe(name: string, x: Float32Array, trueHz: number) {
   check(res.measured && res.latencyMs === 70, `end to end: clicks scheduled 70 ms before they were heard → ${res.latencyMs} ms`);
   // pitch messages keep flowing while onset detection is on
   check(msgs.some((m) => typeof m.onset !== 'number' && typeof m.t === 'number'), 'pitch frames still posted during onset detection');
+// the classic singers carry no voice-quality fields: no technique issue may fire on them
+for (const [name, r] of [['perfect', perfect], ['flat', flat], ['late', late], ['short', short], ['octave', oct]] as const) {
+  const c = r.technique!.counts;
+  check(c.breathy + c.strain + c.crack + c['out-of-air'] === 0 && r.technique!.score === 100, `${name} singer: no technique issues (summary present, score ${r.technique!.score})`);
+}
+
+// =====================================================================================
+// Package B: technique detection
+// =====================================================================================
+console.log('\n--- technique ---');
+const DT = 0.01;
+type FrameShaper = (t: number, note: NoteSpec | null, idx: number) => Partial<PitchFrame> | null;
+/** Synthesize frames for note specs; `shape` can override/add any field or return null for silence. */
+function framesFor(specsIn: NoteSpec[], seconds: number, shape: FrameShaper = () => ({})): PitchFrame[] {
+  const out: PitchFrame[] = [];
+  for (let t = 0; t < seconds; t += DT) {
+    const idx = specsIn.findIndex((s) => t >= s.start && t < s.end);
+    const note = idx >= 0 ? specsIn[idx] : null;
+    const extra = shape(t, note, idx);
+    if (!note || extra === null) {
+      out.push({ t, hz: 0, midi: NaN, rms: 0.001, db: -60, clarity: 0 });
+      continue;
+    }
+    const midi = extra.midi ?? note.midi;
+    const f: PitchFrame = { t, hz: midiToHz(midi), midi, rms: 0.1, db: -20, clarity: 0.95, ...extra, midi };
+    if (extra.midi !== undefined) f.hz = midiToHz(extra.midi);
+    out.push(f);
+  }
+  return out;
+}
+const longNote: NoteSpec[] = [{ midi: 62, start: 0.5, end: 2.0, lyric: 'ah' }];
+const techA = analysisFromNotes(longNote);
+const techOpts = { semitones: 0, allowOctave: true };
+const clean = detectTechnique(techA.notes, framesFor(longNote, 2.5, () => ({ breathiness: 0.2, hnr: 18, pressed: 0.2, voicing: 0.98, peak: 0.5 })), techOpts);
+check(clean.issues.length === 0 && clean.summary.score === 100 && clean.summary.notesChecked === 1, `clean tone: no issues (score ${clean.summary.score})`);
+check(clean.summary.fields.breathiness && clean.summary.fields.pressed && clean.summary.fields.peak, 'clean tone: fields detected as present');
+check(describeTechnique(clean.summary) === null, 'describeTechnique is null when nothing is flagged');
+
+const breathy = detectTechnique(techA.notes, framesFor(longNote, 2.5, () => ({ breathiness: 0.75, hnr: 5 })), techOpts);
+check(breathy.issues.length === 1 && breathy.issues[0].kind === 'breathy', `breathy (index 0.75) flagged: ${breathy.issues[0]?.text}`);
+const breathyHnr = detectTechnique(techA.notes, framesFor(longNote, 2.5, () => ({ hnr: 5 })), techOpts);
+check(breathyHnr.issues.some((i) => i.kind === 'breathy'), 'breathy via HNR < 8 dB when no breathiness index');
+const clearHnr = detectTechnique(techA.notes, framesFor(longNote, 2.5, () => ({ hnr: 16 })), techOpts);
+check(clearHnr.issues.length === 0, 'HNR 16 dB is not breathy');
+const borderline = detectTechnique(techA.notes, framesFor(longNote, 2.5, () => ({ breathiness: 0.55 })), techOpts);
+check(borderline.issues.length === 0, 'breathiness 0.55 is under the threshold');
+const shortNote: NoteSpec[] = [{ midi: 62, start: 0.5, end: 0.7 }];
+const shortBreathy = detectTechnique(analysisFromNotes(shortNote).notes, framesFor(shortNote, 1.0, () => ({ breathiness: 0.9 })), techOpts);
+check(shortBreathy.issues.length === 0, 'breathy rule skips notes under 0.3 s');
+
+const pressed = detectTechnique(techA.notes, framesFor(longNote, 2.5, (t) => ({ pressed: t > 1.0 && t < 1.4 ? 0.85 : 0.3 })), techOpts);
+check(pressed.issues.length === 1 && pressed.issues[0].kind === 'strain' && pressed.summary.counts.strain === 1, `pressed 0.85 for 0.4 s flagged as strain: ${pressed.issues[0]?.text}`);
+const pressedBrief = detectTechnique(techA.notes, framesFor(longNote, 2.5, (t) => ({ pressed: t > 1.0 && t < 1.15 ? 0.9 : 0.3 })), techOpts);
+check(pressedBrief.issues.length === 0, 'pressed for only 0.15 s is not strain');
+const clipping = detectTechnique(techA.notes, framesFor(longNote, 2.5, (t) => ({ peak: t > 0.8 && t < 1.6 ? 0.99 : 0.6 })), { ...techOpts, highMidi: 63 });
+check(clipping.issues.some((i) => i.kind === 'strain' && i.text.includes('clipped')), 'clipping on a high note flagged as strain');
+const clipLow = detectTechnique(techA.notes, framesFor(longNote, 2.5, (t) => ({ peak: t > 0.8 && t < 1.6 ? 0.99 : 0.6 })), { ...techOpts, highMidi: 75 });
+check(clipLow.issues.length === 0, 'clipping on a comfortable note is not strain');
+
+// crack: a +7 semitone flip for 80 ms with a dropout frame around it
+const crackShape: FrameShaper = (t) => {
+  if (t >= 1.195 && t < 1.205) return null; // one unvoiced frame (dropout)
+  if (t >= 1.2 && t < 1.28) return { midi: 69, clarity: 0.9 };
+  return {};
+};
+const cracked = detectTechnique(techA.notes, framesFor(longNote, 2.5, crackShape), techOpts);
+check(cracked.issues.length === 1 && cracked.issues[0].kind === 'crack', `crack flagged (no voice-quality fields needed): ${cracked.issues[0]?.text}`);
+const crackClarity = detectTechnique(techA.notes, framesFor(longNote, 2.5, (t) => (t >= 1.19 && t < 1.21 ? { clarity: 0.55 } : t >= 1.2 && t < 1.28 ? { midi: 69 } : {})), techOpts);
+check(crackClarity.issues.some((i) => i.kind === 'crack'), 'crack with a clarity collapse instead of a dropout');
+const jumpNoDrop = detectTechnique(techA.notes, framesFor(longNote, 2.5, (t) => (t >= 1.2 && t < 1.28 ? { midi: 69 } : {})), techOpts);
+check(jumpNoDrop.issues.length === 0, 'a clean jump without dropout or clarity collapse is not a crack');
+const octaveDown = detectTechnique(techA.notes, framesFor(longNote, 2.5, () => ({ midi: 50 })), techOpts);
+check(octaveDown.issues.length === 0, 'steady octave-down singing is not a crack');
+const crackShortNote: NoteSpec[] = [{ midi: 62, start: 0.5, end: 0.85 }];
+const crackShort = detectTechnique(analysisFromNotes(crackShortNote).notes, framesFor(crackShortNote, 1.2, (t) => (t >= 0.645 && t < 0.655 ? null : t >= 0.65 && t < 0.73 ? { midi: 69 } : {})), techOpts);
+check(crackShort.issues.length === 0, 'crack rule skips notes under 0.4 s');
+
+// out of air: level drops 12 dB and pitch sags 40 cents over the last 40 %
+const fading = detectTechnique(techA.notes, framesFor(longNote, 2.5, (t, nt) => {
+  if (!nt) return {};
+  const p = (t - nt.start) / (nt.end - nt.start);
+  const k = p > 0.6 ? (p - 0.6) / 0.4 : 0;
+  return { db: -20 - 12 * k, midi: nt.midi - 0.4 * k };
+}), techOpts);
+check(fading.issues.length === 1 && fading.issues[0].kind === 'out-of-air', `fading note flagged out of air: ${fading.issues[0]?.text}`);
+const fadingNoSag = detectTechnique(techA.notes, framesFor(longNote, 2.5, (t, nt) => {
+  if (!nt) return {};
+  const p = (t - nt.start) / (nt.end - nt.start);
+  return { db: -20 - (p > 0.6 ? 12 * ((p - 0.6) / 0.4) : 0) };
+}), techOpts);
+check(fadingNoSag.issues.length === 0, 'a controlled decrescendo without pitch sag is not out of air');
+const fadeShortNote: NoteSpec[] = [{ midi: 62, start: 0.5, end: 1.3 }];
+const fadeShort = detectTechnique(analysisFromNotes(fadeShortNote).notes, framesFor(fadeShortNote, 1.6, (t, nt) => {
+  if (!nt) return {};
+  const p = (t - nt.start) / (nt.end - nt.start);
+  const k = p > 0.6 ? (p - 0.6) / 0.4 : 0;
+  return { db: -20 - 12 * k, midi: nt.midi - 0.4 * k };
+}), techOpts);
+check(fadeShort.issues.length === 0, 'out-of-air rule skips notes under 1 s');
+
+// everything at once, and graceful degradation without fields
+const everything = detectTechnique(techA.notes, framesFor(longNote, 2.5, (t, nt) => {
+  if (!nt) return {};
+  const p = (t - nt.start) / (nt.end - nt.start);
+  const k = p > 0.6 ? (p - 0.6) / 0.4 : 0;
+  return { breathiness: 0.8, pressed: 0.9, db: -20 - 12 * k, midi: nt.midi - 0.4 * k };
+}), techOpts);
+check(everything.summary.counts.breathy === 1 && everything.summary.counts.strain === 1 && everything.summary.counts['out-of-air'] === 1 && everything.summary.score < 60, `three issues on one note: score ${everything.summary.score}, "${describeTechnique(everything.summary)}"`);
+const noFields = detectTechnique(techA.notes, framesFor(longNote, 2.5), techOpts);
+check(noFields.issues.length === 0 && !noFields.summary.fields.breathiness && !noFields.summary.fields.pressed, 'no voice-quality fields: field-based rules stay silent');
+const unsung = detectTechnique(techA.notes, framesFor(longNote, 2.5, () => null), techOpts);
+check(unsung.issues.length === 0 && unsung.summary.notesChecked === 0, 'a note that was not sung is not checked');
+
+// wired into scorePhrase: issues, expression penalty, summary, tip
+const techPhrase = techA.phrases[0];
+const cleanScore = scorePhrase(techA, techPhrase, framesFor(longNote, 2.5, () => ({ breathiness: 0.2, pressed: 0.2 })), base);
+const strainScore = scorePhrase(techA, techPhrase, framesFor(longNote, 2.5, () => ({ breathiness: 0.2, pressed: 0.9 })), base);
+check(cleanScore.technique!.score === 100 && cleanScore.scores.overall >= 90, `scorePhrase clean long tone: ${cleanScore.scores.overall}`);
+check(strainScore.issues.some((i) => i.kind === 'strain') && strainScore.technique!.counts.strain === 1, 'scorePhrase carries the strain issue and summary');
+check(strainScore.scores.expression < cleanScore.scores.expression, `strain lowers expression (${cleanScore.scores.expression} → ${strainScore.scores.expression})`);
+check(strainScore.tip.title.includes('straining') && strainScore.tip.exerciseId === 'sirens', `strain wins the tip: "${strainScore.tip.title}"`);
+const breathyScore = scorePhrase(techA, techPhrase, framesFor(longNote, 2.5, () => ({ breathiness: 0.8 })), base);
+check(breathyScore.tip.exerciseId === 'clear-tone' && !!exerciseById('clear-tone'), 'breathy tip points at the Clear tone exercise, which exists');
+const missedScore = scorePhrase(techA, techPhrase, framesFor(longNote, 2.5, () => null), base);
+check(missedScore.technique!.notesChecked === 0 && missedScore.issues.every((i) => i.kind === 'missed'), 'missed notes are not technique-checked in scorePhrase');
+
+// =====================================================================================
+// adaptive difficulty
+// =====================================================================================
+console.log('\n--- adaptive ---');
+function attemptWith(score: number, tempo: number, i = 0): PhraseAttempt {
+  return {
+    id: `a${i}`, songId: 's', phraseIndex: 0, date: i, semitones: 0, tempo,
+    scores: { pitch: score, timing: score, length: score, expression: score, overall: score },
+    issues: [], tip: { title: '', detail: '', exerciseId: null }, frames: [], noteResults: [],
+  };
+}
+const adv0 = defaultSettings('advanced');
+check(adv0.tempo === 1 && adv0.guide === false, 'advanced starts at 100% with the guide off');
+check(defaultSettings('beginner').guide === true, 'beginner starts with the guide on');
+let cur: AdaptiveSettings = { tempo: 1, guide: false, loop: false, reason: '' };
+const history: PhraseAttempt[] = [];
+const one = nextSettings([attemptWith(40, 1)], cur, 'intermediate');
+check(one.tempo === 1 && one.guide === false, `one bad score changes nothing: "${one.reason}"`);
+history.push(attemptWith(40, 1, 1), attemptWith(50, 1, 2));
+cur = nextSettings(history, cur, 'intermediate');
+check(cur.tempo === 0.85 && cur.guide === true && cur.reason.includes('85%'), `two scores < 60 → 85% with the guide: "${cur.reason}"`);
+history.push(attemptWith(30, 0.85, 3), attemptWith(35, 0.85, 4));
+cur = nextSettings(history, cur, 'intermediate');
+check(cur.tempo === 0.7, `again → 70% (${cur.tempo})`);
+history.push(attemptWith(30, 0.7, 5), attemptWith(35, 0.7, 6));
+cur = nextSettings(history, cur, 'intermediate');
+check(cur.tempo === 0.5, `again → 50% (${cur.tempo})`);
+history.push(attemptWith(30, 0.5, 7), attemptWith(35, 0.5, 8));
+cur = nextSettings(history, cur, 'intermediate');
+check(cur.tempo === 0.5 && cur.guide === true, `never slower than 50%: "${cur.reason}"`);
+const mixed = nextSettings([...history, attemptWith(70, 0.5, 9), attemptWith(72, 0.5, 10)], cur, 'intermediate');
+check(mixed.tempo === 0.5 && mixed.guide === true, `middling scores keep the settings: "${mixed.reason}"`);
+history.push(attemptWith(88, 0.5, 11), attemptWith(90, 0.5, 12));
+cur = nextSettings(history, cur, 'intermediate');
+check(cur.tempo === 0.7 && cur.guide === true, `two ≥ 85 → speed up to 70%, guide still on: "${cur.reason}"`);
+history.push(attemptWith(88, 0.7, 13), attemptWith(90, 0.7, 14));
+cur = nextSettings(history, cur, 'intermediate');
+check(cur.tempo === 0.85, `→ 85% (${cur.tempo})`);
+history.push(attemptWith(88, 0.85, 15), attemptWith(90, 0.85, 16));
+cur = nextSettings(history, cur, 'intermediate');
+check(cur.tempo === 1 && cur.guide === true, `→ 100%, guide still on (${cur.tempo}, guide ${cur.guide})`);
+history.push(attemptWith(88, 1, 17), attemptWith(90, 1, 18));
+cur = nextSettings(history, cur, 'intermediate');
+check(cur.tempo === 1 && cur.guide === false, `then guide off: "${cur.reason}"`);
+history.push(attemptWith(92, 1, 19), attemptWith(95, 1, 20));
+cur = nextSettings(history, cur, 'intermediate');
+check(cur.tempo === 1 && cur.guide === false && cur.loop === false && cur.reason.includes('Move on'), `mastered: "${cur.reason}"`);
+const onlyOld = nextSettings([attemptWith(40, 1, 1), attemptWith(40, 1, 2), attemptWith(95, 0.85, 3)], { tempo: 0.85, guide: true, loop: true, reason: '' }, 'beginner');
+check(onlyOld.tempo === 0.85, `scores at another tempo do not count as "at the current settings" (${onlyOld.tempo})`);
+check(masteryFor([]) === 'new' && masteryFor([50]) === 'learning' && masteryFor([80, 78]) === 'learned' && masteryFor([91, 92, 95]) === 'mastered' && masteryFor([95, 60]) === 'learning', 'masteryFor ladder');
+
+// =====================================================================================
+// spaced review
+// =====================================================================================
+console.log('\n--- review ---');
+const T0 = new Date(2026, 0, 1, 10, 0).getTime();
+let rs = updateReview(null, 92, T0, { songId: 's1', phraseIndex: 2 });
+check(rs.songId === 's1' && rs.phraseIndex === 2 && rs.intervalDays >= 1 && rs.intervalDays <= 1.3 && rs.mastery === 'learning', `first review at ${rs.intervalDays} days (${rs.mastery})`);
+const ivs: number[] = [rs.intervalDays];
+let now = T0;
+for (let i = 0; i < 5; i++) {
+  now = rs.dueAt + 3600000; // review an hour after it was due
+  rs = updateReview(rs, 85, now);
+  ivs.push(rs.intervalDays);
+}
+console.log('  intervals at score 85:', ivs.join(' → '));
+check(ivs.every((v, i) => i === 0 || v >= ivs[i - 1]) && ivs.slice(0, 5).every((v, i) => i === 0 || v > ivs[i - 1]) && ivs[ivs.length - 1] <= 45, 'intervals grow up the ladder (1 → 3 → 7 → 14 → 30) and then hold');
+check(Math.abs(ivs[1] - 3) < 0.01 && Math.abs(ivs[2] - 7) < 0.01 && Math.abs(ivs[3] - 14) < 0.01 && Math.abs(ivs[4] - 30) < 0.01, `score 85 keeps the ladder exactly: ${ivs.slice(1, 5).join(', ')}`);
+check(rs.mastery === 'mastered' && rs.bestScore === 92, `after five good reviews: ${rs.mastery}, best ${rs.bestScore}`);
+const reset = updateReview(rs, 55, now + DAY_MS);
+check(reset.intervalDays === 1 && reset.mastery === 'learning' && reset.dueAt === now + 2 * DAY_MS, 'a score < 70 resets to 1 day and mastery to learning');
+const hiScale = updateReview(null, 100, T0, { songId: 'x', phraseIndex: 0 });
+const loScale = updateReview(null, 70, T0, { songId: 'x', phraseIndex: 0 });
+check(hiScale.intervalDays > loScale.intervalDays, `interval scales with score (${loScale.intervalDays} at 70 vs ${hiScale.intervalDays} at 100)`);
+const states: ReviewState[] = [
+  { songId: 's', phraseIndex: 0, mastery: 'mastered', bestScore: 95, lastScore: 95, lastPracticed: 0, dueAt: T0 - 1 * DAY_MS, intervalDays: 30 },
+  { songId: 's', phraseIndex: 1, mastery: 'learning', bestScore: 60, lastScore: 55, lastPracticed: 0, dueAt: T0 - 1 * DAY_MS, intervalDays: 1 },
+  { songId: 's', phraseIndex: 2, mastery: 'learned', bestScore: 80, lastScore: 78, lastPracticed: 0, dueAt: T0 - 6 * DAY_MS, intervalDays: 3 },
+  { songId: 's', phraseIndex: 3, mastery: 'learning', bestScore: 60, lastScore: 50, lastPracticed: 0, dueAt: T0 + 2 * DAY_MS, intervalDays: 1 },
+];
+const due = dueReviews(states, T0, 10);
+check(due.length === 3 && !due.some((d) => d.phraseIndex === 3), `only due reviews are returned (${due.length})`);
+check(due[0].phraseIndex === 2 && due[1].phraseIndex === 1 && due[2].phraseIndex === 0, `ordered most overdue / lowest mastery first: ${due.map((d) => d.phraseIndex).join(',')}`);
+check(dueReviews(states, T0, 1).length === 1, 'limit respected');
+const recs: RecordingRecord[] = [3, 1, 2].map((d) => ({ id: `r${d}`, songId: 's', date: d, kind: 'phrase', phraseIndex: 1, blob: null as unknown as Blob, mime: 'audio/webm', startSongTime: 0, tempo: 1, semitones: 0, frames: [], scores: { pitch: 0, timing: 0, length: 0, expression: 0, overall: 0 } }));
+recs.push({ ...recs[0], id: 'full', kind: 'full', phraseIndex: null, date: 9 });
+const fl = firstAndLatest(recs, 1)!;
+check(fl.first.id === 'r1' && fl.latest.id === 'r3' && fl.count === 3, 'firstAndLatest picks the oldest and newest take of the phrase');
+check(firstAndLatest(recs, null)!.first.id === 'full' && firstAndLatest(recs, 7) === null, 'firstAndLatest: full runs when null, null when nothing');
+
+// =====================================================================================
+// karaoke game
+// =====================================================================================
+console.log('\n--- game ---');
+check(starsFor(95) === 5 && starsFor(94.9) === 4 && starsFor(85) === 4 && starsFor(70) === 3 && starsFor(55) === 2 && starsFor(35) === 1 && starsFor(34) === 0, 'starsFor thresholds');
+check(multiplierFor(0) === 1 && multiplierFor(4) === 1 && multiplierFor(5) === 2 && multiplierFor(15) === 4 && multiplierFor(100) === 4, 'multiplier ×1..×4');
+function playGame(frames: PitchFrame[]) {
+  const g = new KaraokeScorer(analysis, { semitones: 0, level: 'intermediate', tempo: 1 });
+  const events = frames.flatMap((f) => g.feed(f));
+  return { g, events, result: g.finish() };
+}
+const gPerfect = playGame(sing({}));
+const gSloppy = playGame(sing({ cents: 90 }));
+const gSilent = playGame(sing({}).map((f) => ({ ...f, hz: 0, midi: NaN, clarity: 0 })));
+console.log('  perfect:', JSON.stringify({ ...gPerfect.result, perPhrase: gPerfect.result.perPhrase.map((p) => `${p.score}/${p.stars}★`) }));
+console.log('  sloppy:', JSON.stringify({ score: gSloppy.result.score, points: gSloppy.result.points, stars: gSloppy.result.stars, maxCombo: gSloppy.result.maxCombo }));
+check(gPerfect.result.score >= 90 && gPerfect.result.stars >= 4, `perfect singer: score ${gPerfect.result.score}, ${gPerfect.result.stars} stars`);
+check(gPerfect.result.maxCombo >= 10 && gPerfect.result.maxCombo <= analysis.notes.length, `perfect singer combo ${gPerfect.result.maxCombo} of ${analysis.notes.length} notes`);
+check(gPerfect.result.perPhrase.length === analysis.phrases.length && gPerfect.result.perPhrase.every((p) => p.stars >= 4), 'perfect singer: every phrase ≥ 4 stars');
+check(gPerfect.events.filter((e) => e.type === 'phrase').length === analysis.phrases.length, 'a phrase event per phrase while playing');
+check(gPerfect.events.some((e) => e.type === 'multiplier' && e.multiplier === 2), 'multiplier grows with the combo');
+check(gSloppy.result.score < 35 && gSloppy.result.stars === 0 && gSloppy.result.maxCombo === 0, `sloppy singer (90 cents off): score ${gSloppy.result.score}, 0 stars, no combo`);
+check(gSloppy.result.points < gPerfect.result.points * 0.1, `sloppy points ${gSloppy.result.points} ≪ perfect ${gPerfect.result.points}`);
+check(gSilent.result.score === 0 && gSilent.result.points === 0, 'silence scores nothing');
+const sameFrames = sing({ cents: 20 });
+check(JSON.stringify(playGame(sameFrames).result) === JSON.stringify(playGame(sameFrames).result), 'deterministic: same frames → identical result');
+// combo break: on pitch for the first phrase, off pitch for > 0.3 s inside the long C5
+const breakFrames = sing({}).map((f) => (f.t > 4.2 && f.t < 4.7 && f.hz > 0 ? { ...f, midi: f.midi + 3, hz: f.hz * Math.pow(2, 3 / 12) } : f));
+const gBreak = playGame(breakFrames);
+check(gBreak.events.some((e) => e.type === 'combo-break') && gBreak.result.maxCombo < gPerfect.result.maxCombo, `off pitch for 0.5 s breaks the combo (max ${gBreak.result.maxCombo})`);
+const gOct = playGame(sing({ octave: -1 }));
+check(gOct.result.score >= 90, `octave-down singing is accepted in the game (${gOct.result.score})`);
+const liveState = (() => {
+  const g = new KaraokeScorer(analysis, { semitones: 0, level: 'intermediate', tempo: 1 });
+  for (const f of sing({})) if (f.t < 2.0) g.feed(f);
+  return g.state;
+})();
+check(liveState.points > 0 && liveState.onPitchRatio > 0.9 && liveState.phraseIndex === 0 && liveState.multiplier >= 1, `live state mid-song: ${JSON.stringify({ points: liveState.points, combo: liveState.combo, ratio: liveState.onPitchRatio.toFixed(2) })}`);
+
+// =====================================================================================
+// habits
+// =====================================================================================
+console.log('\n--- habits ---');
+function sess(y: number, mo: number, d: number, h: number, minutes: number, i: number): SessionRecord {
+  const st = new Date(y, mo, d, h, 0).getTime();
+  return { id: `s${i}`, startedAt: st, endedAt: st + minutes * 60000, activeSeconds: minutes * 60, songIds: [], phraseAttemptIds: [], exerciseResultIds: [], recap: null };
+}
+const NOW = new Date(2026, 10, 6, 15, 30).getTime(); // Fri 6 Nov 2026, 15:30 local
+const sessions: SessionRecord[] = [
+  sess(2026, 10, 3, 9, 12, 1),
+  sess(2026, 10, 4, 23, 8, 2), // 23:00, counts for the 4th
+  sess(2026, 10, 5, 0, 5, 3), // 00:00 on the 5th: a new day
+  sess(2026, 10, 6, 7, 3, 4),
+  sess(2026, 10, 6, 14, 4, 5),
+  sess(2026, 9, 30, 10, 20, 6), // 30 Oct: streak broken on the 1st/2nd
+];
+check(streakDays(sessions, NOW) === 4, `streak across day boundaries = ${streakDays(sessions, NOW)} (expected 4)`);
+check(streakDays(sessions, new Date(2026, 10, 7, 8, 0).getTime()) === 4, 'streak survives until the next day has passed');
+check(streakDays(sessions, new Date(2026, 10, 8, 8, 0).getTime()) === 0, 'streak is 0 after a missed day');
+check(streakDays(sessions.filter((s) => s.id !== 's3'), NOW) === 1, 'a gap day breaks the streak (3rd, 4th, [gap], 6th → 1)');
+check(streakDays([{ ...sess(2026, 10, 6, 7, 1, 9), activeSeconds: 30 }], NOW) === 0, 'under 60 s does not count');
+check(Math.abs(todayMinutes(sessions, NOW) - 7) < 0.01, `todayMinutes = ${todayMinutes(sessions, NOW)} (expected 7)`);
+check(todayMinutes(sessions, new Date(2026, 10, 4, 23, 59).getTime()) === 8 && todayMinutes(sessions, new Date(2026, 10, 5, 0, 1).getTime()) === 5, 'todayMinutes respects local midnight');
+check(longestStreak(sessions) === 4, `longest streak ${longestStreak(sessions)}`);
+check(dailyGoalMinutes(null) === 10 && dailyGoalMinutes({ dailyGoalMinutes: 15 }) === 15 && dailyGoalMinutes({ dailyGoalMinutes: 0 }) === 10, 'dailyGoalMinutes default 10');
+const rem1 = nextReminderAt({ reminderTime: '18:30' }, NOW)!;
+const rem2 = nextReminderAt({ reminderTime: '09:00' }, NOW)!;
+check(new Date(rem1).getDate() === 6 && new Date(rem1).getHours() === 18 && new Date(rem1).getMinutes() === 30, 'reminder later today');
+check(new Date(rem2).getDate() === 7 && new Date(rem2).getHours() === 9, 'reminder time already passed → tomorrow');
+check(nextReminderAt({ reminderTime: null }, NOW) === null && nextReminderAt({ reminderTime: '25:00' }, NOW) === null, 'no / malformed reminder → null');
+
+// =====================================================================================
+// pitch-corrected replay
+// =====================================================================================
+console.log('\n--- pitchCorrect ---');
+const pcSpecs: NoteSpec[] = [
+  { midi: 60, start: 0.5, end: 1.0 },
+  { midi: 64, start: 1.0, end: 1.5 }, // legato join with the previous note
+  { midi: 67, start: 2.0, end: 3.0 },
+];
+const pcA = analysisFromNotes(pcSpecs);
+const sharpFrames = framesFor(pcSpecs, 3.5, (_t, nt) => (nt ? { midi: nt.midi + 0.3 } : {}));
+const plan = planCorrections(sharpFrames, pcA, { semitones: 0, startSongTime: 0, tempo: 1 });
+check(plan.length === 3 && plan.every((r) => Math.abs(r.cents - 30) < 3), `sharp singer: 3 regions of ≈ +30 cents (${plan.map((r) => r.cents.toFixed(0)).join(',')})`);
+check(plan.every((r, i) => i === 0 || r.start >= plan[i - 1].end - 1e-9), 'regions never overlap');
+const inTune = planCorrections(framesFor(pcSpecs, 3.5), pcA, { semitones: 0, startSongTime: 0, tempo: 1 });
+check(inTune.length === 0, 'in-tune singer: nothing to fix');
+const octPlan = planCorrections(framesFor(pcSpecs, 3.5, (_t, nt) => (nt ? { midi: nt.midi - 12 - 0.2 } : {})), pcA, { semitones: 0, startSongTime: 0, tempo: 1 });
+check(octPlan.length === 3 && octPlan.every((r) => Math.abs(r.cents + 20) < 3), `octave-down singer is corrected to the nearest octave only (${octPlan.map((r) => r.cents.toFixed(0)).join(',')})`);
+const skipPlan = planCorrections(framesFor(pcSpecs, 3.5, (_t, nt, idx) => (idx === 1 ? null : nt ? { midi: nt.midi + 0.3 } : {})), pcA, { semitones: 0, startSongTime: 0, tempo: 1 });
+check(skipPlan.length === 2 && !skipPlan.some((r) => r.noteId === 1), 'an unsung note is left untouched');
+// the recording started at song time 0.4 at 70 % tempo: recording time = (song − 0.4) / 0.7
+const slowPlan = planCorrections(sharpFrames, pcA, { semitones: 0, startSongTime: 0.4, tempo: 0.7 });
+check(Math.abs(slowPlan[0].start - (0.5 - 0.4) / 0.7) < 1e-6 && Math.abs(slowPlan[2].end - (3.0 - 0.4) / 0.7) < 0.02, `recording-time mapping with startSongTime and tempo (${slowPlan[0].start.toFixed(3)} .. ${slowPlan[2].end.toFixed(3)})`);
+const transposed2 = planCorrections(framesFor(pcSpecs, 3.5, (_t, nt) => (nt ? { midi: nt.midi - 3 + 0.25 } : {})), pcA, { semitones: -3, startSongTime: 0, tempo: 1 });
+check(transposed2.length === 3 && transposed2.every((r) => Math.abs(r.cents - 25) < 3), 'transposed reference: error measured against the transposed target');
+const lateFrames = framesFor(pcSpecs.map((s) => ({ ...s, start: s.start + 0.12, end: s.end + 0.12 })), 3.5, (_t, nt) => (nt ? { midi: nt.midi + 0.3 } : {}));
+const latePlan = planCorrections(lateFrames, pcA, { semitones: 0, startSongTime: 0, tempo: 1 });
+check(latePlan.length === 3 && latePlan[2].end > 3.0 + 0.1 && latePlan[2].end <= 3.5, `late singer: the region follows the sung tail (${latePlan[2].end.toFixed(2)})`);
+const fromResults = planCorrections(sharpFrames, pcA, { semitones: 0, startSongTime: 0, tempo: 1, noteResults: [
+  { noteId: 0, sungMidi: 60.4, centsError: 40, onsetDelta: 0, heldRatio: 1, coverage: 1, status: 'sharp' },
+  { noteId: 1, sungMidi: null, centsError: null, onsetDelta: null, heldRatio: null, coverage: 0, status: 'missed' },
+  { noteId: 2, sungMidi: 67, centsError: 2, onsetDelta: 0, heldRatio: 1, coverage: 1, status: 'good' },
+] });
+check(fromResults.length === 1 && fromResults[0].noteId === 0 && fromResults[0].cents === 40, 'attempt note results are used when given (missed and in-tune notes skipped)');
+
+// DSP core on synthetic channels
+const SR = 8000;
+const sine = (hz: number, n: number, sr = SR) => Float32Array.from({ length: n }, (_, i) => 0.5 * Math.sin((2 * Math.PI * hz * i) / sr));
+const identity: PitchShifter = { shift: async (ch) => ch.map((c) => Float32Array.from(c)) };
+const negate: PitchShifter = { shift: async (ch) => ch.map((c) => c.map((v) => -v)) };
+const shortOut: PitchShifter = { shift: async (ch) => ch.map((c) => c.slice(0, Math.max(0, c.length - Math.round(SR * 0.05))).map((v) => -v)) };
+/** Naive resampler: changes pitch (and length) like a tape machine; good enough to check the join logic. */
+const tape: PitchShifter = {
+  shift: async (ch, sr, semis) => {
+    const rate = Math.pow(2, semis / 12);
+    return ch.map((c) => {
+      const n = Math.floor(c.length / rate);
+      const o = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const x = i * rate;
+        const k = Math.floor(x);
+        const fr = x - k;
+        o[i] = (c[k] ?? 0) * (1 - fr) + (c[k + 1] ?? c[k] ?? 0) * fr;
+      }
+      return o;
+    });
+  },
+};
+const input = [sine(220, 2 * SR), sine(220, 2 * SR).map((v) => v * 0.5)];
+const regions = [
+  { noteId: 0, start: 0.5, end: 1.0, cents: 30 },
+  { noteId: 1, start: 1.0, end: 1.5, cents: -40 },
+];
+const same = await pitchCorrectChannels(input, SR, regions, identity);
+check(same.length === 2 && same[0].length === input[0].length && same[0].every((v, i) => Math.abs(v - input[0][i]) < 1e-7) && same[1].every((v, i) => Math.abs(v - input[1][i]) < 1e-7), 'identity shifter: output equals input, same length and channel count');
+check(same[0] !== input[0] && input[0][SR] === sine(220, 2 * SR)[SR], 'input channels are not modified');
+const neg = await pitchCorrectChannels(input, SR, regions, negate);
+const F = Math.round(SR * 0.01);
+const at = (s: number) => Math.round(s * SR);
+check(neg[0].length === input[0].length, 'negate shifter: length preserved');
+check(neg[0][at(0.25)] === input[0][at(0.25)] && neg[0][at(1.75)] === input[0][at(1.75)], 'outside the regions the original is untouched');
+check(Math.abs(neg[0][at(0.75)] + input[0][at(0.75)]) < 1e-6 && Math.abs(neg[0][at(1.25)] + input[0][at(1.25)]) < 1e-6, 'inside both regions the shifted audio replaces the original');
+check(Math.abs(neg[1][at(0.75)] + input[1][at(0.75)]) < 1e-6, 'second channel processed too');
+// at the legato join (1.0 s) two shifted regions crossfade into each other: no original leaks in
+check(Math.abs(neg[0][at(1.0)] + input[0][at(1.0)]) < 1e-6 && Math.abs(neg[0][at(1.0) - F / 2] + input[0][at(1.0) - F / 2]) < 1e-6 && Math.abs(neg[0][at(1.0) + F / 2] + input[0][at(1.0) + F / 2]) < 1e-6, 'adjacent regions join without the original leaking in');
+// the fade-in at 0.5 s and the fade-out at 1.5 s are 10 ms ramps: mixes of original and shifted
+const ramp = (s: number) => {
+  const i = at(s);
+  const o = input[0][i];
+  const w = o !== 0 ? (o - neg[0][i]) / (2 * o) : NaN; // weight of the shifted (negated) signal
+  return w;
+};
+const wIn = ramp(0.5 - 0.005);
+const wOut = ramp(1.5 + 0.005);
+check(wIn > 0.3 && wIn < 0.7 && wOut > 0.3 && wOut < 0.7, `10 ms crossfades at the outer joins (weights ${wIn.toFixed(2)}, ${wOut.toFixed(2)})`);
+check(ramp(0.5 - 0.012) < 0.01 && ramp(1.5 + 0.012) < 0.01, 'crossfade is confined to 10 ms');
+const shortRes = await pitchCorrectChannels(input, SR, regions, shortOut);
+check(shortRes[0].length === input[0].length && Math.abs(shortRes[0][at(1.49)] + input[0][at(1.49)]) < 1e-6, 'a shifter that returns 50 ms less is still fitted over the whole region (extra source margin)');
+const empty = await pitchCorrectChannels(input, SR, [], identity);
+check(empty[0].length === input[0].length, 'no regions: unchanged copy');
+const tiny = await pitchCorrectChannels(input, SR, [{ noteId: 0, start: 0.5, end: 0.505, cents: 30 }], negate);
+check(tiny[0].every((v, i) => v === input[0][i]), 'regions shorter than 20 ms are skipped');
+// real pitch change with the tape shifter: measure the frequency by zero crossings in the region
+const zc = (x: Float32Array, a: number, b: number) => {
+  let c = 0;
+  for (let i = a + 1; i < b; i++) if ((x[i - 1] < 0 && x[i] >= 0) || (x[i - 1] >= 0 && x[i] < 0)) c++;
+  return (c / 2) / ((b - a) / SR);
+};
+const taped = await pitchCorrectChannels([sine(220, 2 * SR)], SR, [{ noteId: 0, start: 0.5, end: 1.5, cents: -200 }], tape); // 200 cents flat → shift up 2 semitones
+const fIn = zc(taped[0], at(0.55), at(1.4));
+const fOut = zc(taped[0], at(0.0), at(0.45));
+const fExp = 220 * Math.pow(2, 2 / 12);
+check(Math.abs(fIn - fExp) < 4 && Math.abs(fOut - 220) < 3, `tape shifter: ${fIn.toFixed(1)} Hz inside (expected ${fExp.toFixed(1)}), ${fOut.toFixed(1)} Hz outside`);
+check(taped[0].length === 2 * SR, 'total length unchanged after a real pitch shift');
+const wav = encodeWav([sine(440, 800)], SR);
+check(wav.size === 44 + 800 * 2 && wav.type === 'audio/wav', `WAV encoder: ${wav.size} bytes`);
+
+// =====================================================================================
+// plan: review items; exercises
+// =====================================================================================
+console.log('\n--- plan & exercises ---');
+const profile: Profile = { id: 'me', createdAt: 0, name: 'T', level: 'intermediate', goals: ['sing-songs'], rangeTests: [{ date: Date.now(), lowMidi: 48, highMidi: 72, voiceType: 'Tenor', accuracyCents: 10, stabilityCents: 5, accuracyScore: 90 }], calibration: null, allowOctave: true, onboardingDone: true };
+const songRec: SongRecord = { id: 'song1', createdAt: 0, title: 'Test song', artist: 'A', duration: 8, analysis, lyrics: { source: 'none', synced: false, lines: [] }, mode: 'separated', hasStems: false, preferredSemitones: 0, recommendedSemitones: 0, jobId: null };
+const noReviewPlan = buildPlan(profile, [], [], [songRec]);
+check(noReviewPlan[0].kind === 'warmup' && !noReviewPlan.some((i) => i.kind === 'review'), 'buildPlan without reviews is unchanged (warm-up first, no review items)');
+const planNow = Date.now();
+const reviewStates: ReviewState[] = [
+  { songId: 'song1', phraseIndex: 1, mastery: 'learning', bestScore: 65, lastScore: 60, lastPracticed: planNow - 2 * DAY_MS, dueAt: planNow - DAY_MS, intervalDays: 1 },
+  { songId: 'song1', phraseIndex: 0, mastery: 'mastered', bestScore: 95, lastScore: 95, lastPracticed: planNow - 31 * DAY_MS, dueAt: planNow - 0.5 * DAY_MS, intervalDays: 30 },
+  { songId: 'song1', phraseIndex: 2, mastery: 'learned', bestScore: 80, lastScore: 80, lastPracticed: planNow, dueAt: planNow + 3 * DAY_MS, intervalDays: 3 },
+  { songId: 'gone', phraseIndex: 0, mastery: 'learning', bestScore: 10, lastScore: 10, lastPracticed: 0, dueAt: planNow - 9 * DAY_MS, intervalDays: 1 },
+];
+const withReviews = buildPlan(profile, [], [], [songRec], reviewStates, planNow);
+const reviewIdx = withReviews.map((i, k) => (i.kind === 'review' ? k : -1)).filter((k) => k >= 0);
+check(reviewIdx.length === 2 && reviewIdx[0] === 1 && reviewIdx[1] === 2, `two due reviews right after the warm-up (positions ${reviewIdx.join(',')}); deleted song skipped`);
+check(withReviews[1].phraseIndex === 1 && withReviews[1].songId === 'song1' && withReviews[1].title.includes('phrase 2') && withReviews[1].why.includes('overdue'), `most urgent review first: "${withReviews[1].title}" (${withReviews[1].why})`);
+const attemptsForDup: PhraseAttempt[] = [{ ...attemptWith(50, 1, 1), songId: 'song1', phraseIndex: 1 }];
+const dedup = buildPlan(profile, attemptsForDup, [], [songRec], reviewStates, planNow);
+check(dedup.filter((i) => i.songId === 'song1' && i.phraseIndex === 1).length === 1, 'the weakest-phrase item does not duplicate a review item');
+const clearTone = exerciseById('clear-tone')!;
+const ctPlan = clearTone.build(profile);
+check(ctPlan.kind === 'pitched' && ctPlan.analysis.notes.length === 15 && ctPlan.analysis.phrases.length >= 1 && ctPlan.analysis.notes.every((n) => n.midi >= 48 && n.midi <= 72), `Clear tone builds ${ctPlan.kind === 'pitched' ? ctPlan.analysis.notes.length : 0} notes inside the range`);
+check(EXERCISES.filter((e) => e.id === 'clear-tone').length === 1 && new Set(EXERCISES.map((e) => e.id)).size === EXERCISES.length, 'exercise ids are unique');
+check(exerciseForIssue('breathy')?.id === 'clear-tone' && exerciseForIssue('crack')?.id === 'register-transitions' && exerciseForIssue('out-of-air')?.id === 'breath-support' && exerciseForIssue('strain')?.id === 'sirens', 'exerciseForIssue maps the technique issues');
+for (const e of EXERCISES) {
+  const p = e.build(profile);
+  if (p.kind === 'pitched') check(p.analysis.notes.length > 0 && p.analysis.phrases.length > 0 && p.analysis.duration > 0, `exercise "${e.name}" builds a valid analysis`);
 }
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`);

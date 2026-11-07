@@ -1,11 +1,14 @@
 import type { CriterionScore, IssueKind, Level, NoteIssue, NoteResult, Phrase, PitchFrame, RefNote, SongAnalysis, Tip } from '../types';
 import { median, mean, std, midiToName, clamp } from '../music/notes';
 import { detectVibrato } from '../analysis/segment';
+import { detectTechnique, type TechniqueSummary } from './technique';
 
 export interface ScoreOptions {
   semitones: number;
   level: Level;
   allowOctave: boolean;
+  /** Top of the singer's range (MIDI); lets the technique rules spot clipping on high notes. */
+  highMidi?: number;
 }
 
 export interface PhraseScore {
@@ -13,6 +16,8 @@ export interface PhraseScore {
   issues: NoteIssue[];
   noteResults: NoteResult[];
   tip: Tip;
+  /** Technique summary (breathy, strain, crack, out-of-air). Always set by scorePhrase; optional for callers that assemble a PhraseScore by hand. */
+  technique?: TechniqueSummary;
 }
 
 export function tolerances(level: Level) {
@@ -348,6 +353,11 @@ export function scorePhrase(analysis: SongAnalysis, phrase: Phrase, framesIn: Pi
     }
   }
 
+  // ---- technique: breathy, strain, crack, out of air (expression bucket) ----
+  const technique = detectTechnique(notes, frames, { semitones: semis, allowOctave: opts.allowOctave, highMidi: opts.highMidi, noteResults: results });
+  issues.push(...technique.issues);
+  exprScores.push(...technique.exprScores);
+
   const agg = (arr: { w: number; s: number }[]): number | null => {
     const W = arr.reduce((a, b) => a + b.w, 0);
     if (W === 0) return null;
@@ -371,7 +381,7 @@ export function scorePhrase(analysis: SongAnalysis, phrase: Phrase, framesIn: Pi
   // order the per-note results like the notes
   results.sort((a, b) => a.noteId - b.noteId);
   const tip = pickTip(issues, scores, notes.length);
-  return { scores, issues, noteResults: results, tip };
+  return { scores, issues, noteResults: results, tip, technique: technique.summary };
 }
 
 function longestUnvoiced(fs: PitchFrame[], voiced: (f: PitchFrame) => boolean): number {
@@ -464,8 +474,8 @@ const TIPS: Record<IssueKind, Tip> = {
   },
   breathy: {
     title: 'Too much air in the tone',
-    detail: 'Your tone is breathy: air is escaping without turning into sound. Bring the vocal folds together gently, like a soft "uh-oh", and sing on a thinner, steadier stream of air. Long tones and lip trills fix this fastest.',
-    exerciseId: 'sustain',
+    detail: 'Your tone is breathy: air is escaping without turning into sound. Bring the vocal folds together gently, like a soft "uh-oh", and sing on a thinner, steadier stream of air. The "Clear tone" exercise fixes this fastest.',
+    exerciseId: 'clear-tone',
   },
   crack: {
     title: 'The voice flipped',
@@ -498,6 +508,8 @@ export function pickTip(issues: NoteIssue[], scores: CriterionScore, noteCount: 
   for (const i of issues) totals.set(i.kind, (totals.get(i.kind) ?? 0) + i.severity);
   const missed = totals.get('missed') ?? 0;
   if (missed >= Math.max(1, noteCount * 0.25)) return TIPS.missed;
+  // vocal health first: clear strain beats every other tip
+  if ((totals.get('strain') ?? 0) >= 0.6) return TIPS.strain;
   let bestKind: IssueKind = issues[0].kind;
   let best = -1;
   for (const [k, v] of totals) {

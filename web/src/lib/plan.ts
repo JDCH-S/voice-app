@@ -1,9 +1,10 @@
-import type { ExerciseResult, PhraseAttempt, Profile, SongRecord, IssueKind, SessionRecap } from './types';
+import type { ExerciseResult, PhraseAttempt, Profile, SongRecord, IssueKind, SessionRecap, ReviewState } from './types';
 import { EXERCISES, exerciseById, warmupFor } from './exercises/library';
 import { tipFor } from './scoring/score';
+import { describeDue, dueReviews } from './review';
 
 export interface PlanItem {
-  kind: 'warmup' | 'exercise' | 'phrase' | 'song' | 'range-test' | 'import';
+  kind: 'warmup' | 'exercise' | 'phrase' | 'song' | 'range-test' | 'import' | 'review';
   title: string;
   why: string;
   exerciseId?: string;
@@ -45,7 +46,32 @@ export function dominantIssue(attempts: PhraseAttempt[]): IssueKind | null {
   return best;
 }
 
-export function buildPlan(profile: Profile, attempts: PhraseAttempt[], exResults: ExerciseResult[], songs: SongRecord[]): PlanItem[] {
+export const MAX_REVIEW_ITEMS = 3;
+
+/** Due spaced-review phrases as plan items (songs that no longer exist are skipped). */
+export function reviewItems(reviews: ReviewState[], songs: SongRecord[], now: number, limit = MAX_REVIEW_ITEMS): PlanItem[] {
+  const items: PlanItem[] = [];
+  const known = reviews.filter((r) => songs.some((s) => s.id === r.songId));
+  for (const r of dueReviews(known, now, limit)) {
+    const song = songs.find((s) => s.id === r.songId)!;
+    const phrase = song.analysis.phrases[r.phraseIndex];
+    const text = phrase?.text ? ` ("${phrase.text.slice(0, 30)}${phrase.text.length > 30 ? '…' : ''}")` : '';
+    items.push({
+      kind: 'review',
+      title: `Review "${song.title}": phrase ${r.phraseIndex + 1}${text}`,
+      why: `Spaced review, ${describeDue(r, now)}. One good take today keeps it for longer.`,
+      songId: song.id,
+      phraseIndex: r.phraseIndex,
+      minutes: r.mastery === 'mastered' ? 2 : 3,
+    });
+  }
+  return items;
+}
+
+/**
+ * Today's plan. `reviews` (optional) adds "Review" items right after the warm-up when any phrase is due.
+ */
+export function buildPlan(profile: Profile, attempts: PhraseAttempt[], exResults: ExerciseResult[], songs: SongRecord[], reviews?: ReviewState[], now: number = Date.now()): PlanItem[] {
   const items: PlanItem[] = [];
   const warm = warmupFor(profile.level, profile.goals);
   items.push({
@@ -54,6 +80,8 @@ export function buildPlan(profile: Profile, attempts: PhraseAttempt[], exResults
     why: 'Always start here. Five minutes protects your voice and makes everything after it easier.',
     minutes: warm.reduce((a, b) => a + b.minutes, 0),
   });
+  const reviewing = reviews && reviews.length ? reviewItems(reviews, songs, now) : [];
+  items.push(...reviewing);
   const last = profile.rangeTests[profile.rangeTests.length - 1];
   if (!last || daysSince(last.date) >= RANGE_RETEST_DAYS) {
     items.push({
@@ -92,7 +120,7 @@ export function buildPlan(profile: Profile, attempts: PhraseAttempt[], exResults
     if (!songs.find((s) => s.id === songId)) continue;
     if (!weakest || v < weakest.score) weakest = { songId, phraseIndex: parseInt(pi, 10), score: v };
   }
-  if (weakest && weakest.score < 85) {
+  if (weakest && weakest.score < 85 && !reviewing.some((r) => r.songId === weakest!.songId && r.phraseIndex === weakest!.phraseIndex)) {
     const song = songs.find((s) => s.id === weakest!.songId)!;
     items.push({
       kind: 'phrase',
